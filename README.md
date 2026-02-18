@@ -54,6 +54,7 @@ k8s-project-starter/
 │   └── registry/                  # Container registry configs
 │
 └── scripts/
+    ├── setup-repo.sh              # Setup after forking
     ├── version-bump.sh            # Bump VERSION files
     └── validate-platform.sh       # Validate compatibility
 ```
@@ -355,6 +356,40 @@ See [`deploy/deploy.schema.yaml`](deploy/deploy.schema.yaml) for full configurat
 
 ## Getting Started
 
+### After Forking
+
+When you fork this repository, GitHub gives you the option to fork only the `main` branch. If you chose that option (or want to ensure all required branches exist), run the setup script:
+
+```bash
+# Clone your fork
+git clone https://github.com/YOUR_USERNAME/k8s-project-starter.git
+cd k8s-project-starter
+
+# Run the setup script to create required branches
+./scripts/setup-repo.sh
+```
+
+This creates the `develop` and `staging` branches required for the CI/CD pipeline:
+
+```
+main (production)
+  └── staging (release candidates)
+        └── develop (development)
+```
+
+**Options:**
+
+```bash
+# Preview what will be done (no changes)
+./scripts/setup-repo.sh --dry-run
+
+# Create branches locally without pushing
+./scripts/setup-repo.sh --local-only
+
+# Also configure GitHub environments (requires gh CLI)
+./scripts/setup-repo.sh --setup-envs
+```
+
 ### Prerequisites
 
 - Docker
@@ -454,6 +489,9 @@ Migrations run automatically during deployment:
 ## Scripts
 
 ```bash
+# Setup repository after forking (creates develop/staging branches)
+./scripts/setup-repo.sh
+
 # Bump service version
 ./scripts/version-bump.sh <service-path> <major|minor|patch>
 
