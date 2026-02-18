@@ -75,8 +75,6 @@ jobs:
       KUBECONFIG: ${{ secrets.DEV_KUBECONFIG }}
       MYSQL_PASSWORD: ${{ secrets.DEV_MYSQL_PASSWORD }}
       JWT_SECRET: ${{ secrets.DEV_JWT_SECRET }}
-    # Only run for kubernetes deploy types
-    if: matrix.deploy_type == 'kubernetes'
 
   # Deploy to traditional servers
   deploy-server:
@@ -98,8 +96,6 @@ jobs:
     secrets:
       SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
       SSH_USER: ${{ secrets.DEV_SSH_USER }}
-    # Only run for server deploy types
-    if: matrix.deploy_type == 'server'
 
   # Run database migrations (for RDS/managed databases)
   deploy-migrations:
@@ -117,8 +113,6 @@ jobs:
       DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
       DATABASE_USER: ${{ secrets.DEV_DATABASE_USER }}
       DATABASE_PASSWORD: ${{ secrets.DEV_DATABASE_PASSWORD }}
-    # Only run for migration deploy types
-    if: matrix.deploy_type == 'migration'
 
   notify:
     needs: [detect-changes, build, deploy-kubernetes, deploy-server, deploy-migrations]

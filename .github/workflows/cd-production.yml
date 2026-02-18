@@ -72,7 +72,6 @@ jobs:
       KUBECONFIG: ${{ secrets.PROD_KUBECONFIG }}
       MYSQL_PASSWORD: ${{ secrets.PROD_MYSQL_PASSWORD }}
       JWT_SECRET: ${{ secrets.PROD_JWT_SECRET }}
-    if: matrix.deploy_type == 'kubernetes'
 
   # Deploy to traditional servers (with manual approval via environment)
   deploy-server:
@@ -95,7 +94,6 @@ jobs:
     secrets:
       SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
       SSH_USER: ${{ secrets.PROD_SSH_USER }}
-    if: matrix.deploy_type == 'server'
 
   # Run database migrations (with manual approval via environment)
   deploy-migrations:
@@ -113,7 +111,6 @@ jobs:
       DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
       DATABASE_USER: ${{ secrets.PROD_DATABASE_USER }}
       DATABASE_PASSWORD: ${{ secrets.PROD_DATABASE_PASSWORD }}
-    if: matrix.deploy_type == 'migration'
 
   create-release:
     needs: [detect-changes, build, deploy-kubernetes, deploy-server, deploy-migrations]
