@@ -47,6 +47,8 @@ Secrets store sensitive values like passwords and API keys. The pipeline needs d
 
 Repeat for each environment (`development`, `staging`, `production`).
 
+**Note:** Enter secrets as plain text. GitHub encrypts them automatically. The only exception is `KUBECONFIG` which should be base64-encoded (see below) because it's a multi-line file.
+
 ---
 
 ## Step 3: Which Secrets Do You Need?
@@ -57,11 +59,11 @@ You only need to configure secrets for the deployment types you're using. Skip s
 
 If you're deploying containers to Kubernetes clusters:
 
-| Secret Name | Environment | Description | How to Get It |
-|-------------|-------------|-------------|---------------|
-| `DEV_KUBECONFIG` | development | Kubernetes config for dev cluster | See "Getting your kubeconfig" below |
-| `STAGING_KUBECONFIG` | staging | Kubernetes config for staging cluster | Same as above |
-| `PROD_KUBECONFIG` | production | Kubernetes config for prod cluster | Same as above |
+| Secret Name | Environment | Description | Format |
+|-------------|-------------|-------------|--------|
+| `DEV_KUBECONFIG` | development | Kubernetes config for dev cluster | base64-encoded |
+| `STAGING_KUBECONFIG` | staging | Kubernetes config for staging cluster | base64-encoded |
+| `PROD_KUBECONFIG` | production | Kubernetes config for prod cluster | base64-encoded |
 
 **Getting your kubeconfig:**
 
@@ -89,14 +91,14 @@ Copy the base64 output and paste it as the secret value.
 
 If you're deploying to traditional servers via SSH:
 
-| Secret Name | Environment | Description | How to Get It |
-|-------------|-------------|-------------|---------------|
-| `DEV_SSH_PRIVATE_KEY` | development | SSH private key | Contents of your `~/.ssh/id_rsa` or `id_ed25519` |
-| `DEV_SSH_USER` | development | SSH username | Usually `deploy` or your server username |
-| `STAGING_SSH_PRIVATE_KEY` | staging | SSH private key for staging | Same as above |
-| `STAGING_SSH_USER` | staging | SSH username | Same as above |
-| `PROD_SSH_PRIVATE_KEY` | production | SSH private key for production | Same as above |
-| `PROD_SSH_USER` | production | SSH username | Same as above |
+| Secret Name | Environment | Description | Format |
+|-------------|-------------|-------------|--------|
+| `DEV_SSH_PRIVATE_KEY` | development | SSH private key (contents of `~/.ssh/id_ed25519`) | plain text |
+| `DEV_SSH_USER` | development | SSH username (e.g., `deploy`) | plain text |
+| `STAGING_SSH_PRIVATE_KEY` | staging | SSH private key for staging | plain text |
+| `STAGING_SSH_USER` | staging | SSH username | plain text |
+| `PROD_SSH_PRIVATE_KEY` | production | SSH private key for production | plain text |
+| `PROD_SSH_USER` | production | SSH username | plain text |
 
 **Setting up SSH keys:**
 
@@ -115,17 +117,19 @@ cat ~/.ssh/deploy_key
 
 If you're running Flyway migrations against a managed database:
 
-| Secret Name | Environment | Description | Example |
-|-------------|-------------|-------------|---------|
-| `DEV_DATABASE_URL` | development | JDBC connection URL | `jdbc:mysql://db.dev.example.com:3306/myapp` |
-| `DEV_DATABASE_USER` | development | Database username | `app_user` |
-| `DEV_DATABASE_PASSWORD` | development | Database password | Your password |
-| `STAGING_DATABASE_URL` | staging | JDBC connection URL | `jdbc:mysql://db.staging.example.com:3306/myapp` |
-| `STAGING_DATABASE_USER` | staging | Database username | `app_user` |
-| `STAGING_DATABASE_PASSWORD` | staging | Database password | Your password |
-| `PROD_DATABASE_URL` | production | JDBC connection URL | `jdbc:mysql://db.example.com:3306/myapp` |
-| `PROD_DATABASE_USER` | production | Database username | `app_user` |
-| `PROD_DATABASE_PASSWORD` | production | Database password | Your password |
+| Secret Name | Environment | Example |
+|-------------|-------------|---------|
+| `DEV_DATABASE_URL` | development | `jdbc:mysql://db.dev.example.com:3306/myapp` |
+| `DEV_DATABASE_USER` | development | `app_user` |
+| `DEV_DATABASE_PASSWORD` | development | (your password) |
+| `STAGING_DATABASE_URL` | staging | `jdbc:mysql://db.staging.example.com:3306/myapp` |
+| `STAGING_DATABASE_USER` | staging | `app_user` |
+| `STAGING_DATABASE_PASSWORD` | staging | (your password) |
+| `PROD_DATABASE_URL` | production | `jdbc:mysql://db.example.com:3306/myapp` |
+| `PROD_DATABASE_USER` | production | `app_user` |
+| `PROD_DATABASE_PASSWORD` | production | (your password) |
+
+All database secrets are plain text.
 
 ### Application Secrets
 
