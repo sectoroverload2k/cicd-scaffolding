@@ -243,8 +243,7 @@ success "Setup complete!"
 echo ""
 
 # Summary
-cat << EOF
-${BLUE}Branch structure:${NC}
+echo -e "${BLUE}Branch structure:${NC}
 
   main (production)
     └── staging (release candidates)
@@ -269,5 +268,4 @@ ${BLUE}Next steps:${NC}
   3. Start developing:
      git checkout develop
      git checkout -b feature/my-service/add-feature
-
-EOF
+"
