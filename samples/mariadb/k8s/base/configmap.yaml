@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-config
+data:
+  database: myapp
+
+  my.cnf: |
+    [mysqld]
+    character-set-server = utf8mb4
+    collation-server = utf8mb4_unicode_ci
+
+    # InnoDB settings
+    innodb_buffer_pool_size = 256M
+    innodb_log_file_size = 64M
+
+    # Connection settings
+    max_connections = 200
+
+    # General settings
+    max_allowed_packet = 64M
+
+  init.sql: |
+    -- Initial schema
+    -- This runs on first deployment only
+    -- For ongoing changes, use Flyway migrations instead
+
+    -- Example table
+    CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_email (email),
+        INDEX idx_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

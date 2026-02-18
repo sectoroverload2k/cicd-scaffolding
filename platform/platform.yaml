@@ -1,0 +1,108 @@
+# Platform Manifest - "App of Apps" Pattern
+# This file defines the platform version and component requirements.
+# Used as the source of truth for ArgoCD app-of-apps deployments.
+
+platform:
+  name: "MyPlatform"
+  version: "1.0.0"
+  description: "Kubernetes Monorepo Platform"
+
+# Component definitions with version constraints
+components:
+  # User-facing applications
+  apps:
+    dashboard:
+      version: ">=1.0.0"
+      required: true
+      description: "Main dashboard application"
+    landing:
+      version: ">=1.0.0"
+      required: false
+      description: "Public landing page"
+
+  # Backend microservices
+  services:
+    api:
+      version: ">=1.0.0"
+      required: true
+      description: "Core API service"
+    auth:
+      version: ">=1.0.0"
+      required: true
+      description: "Authentication service"
+
+  # Infrastructure components
+  infra:
+    mysql:
+      version: "8.0"
+      required: true
+      description: "MySQL database"
+    redis:
+      version: ">=7.0"
+      required: false
+      description: "Redis cache"
+
+# Component compatibility matrix
+# Defines which versions of components work together
+compatibility:
+  api:
+    requires:
+      auth: ">=1.0.0"
+      mysql: ">=8.0"
+  dashboard:
+    requires:
+      api: ">=1.0.0"
+  auth:
+    requires:
+      mysql: ">=8.0"
+      redis: ">=7.0"
+
+# Environment-specific overrides
+environments:
+  dev:
+    components:
+      apps:
+        dashboard:
+          replicas: 1
+        landing:
+          replicas: 1
+      services:
+        api:
+          replicas: 1
+        auth:
+          replicas: 1
+
+  staging:
+    components:
+      apps:
+        dashboard:
+          replicas: 2
+        landing:
+          replicas: 1
+      services:
+        api:
+          replicas: 2
+        auth:
+          replicas: 2
+
+  prod:
+    components:
+      apps:
+        dashboard:
+          replicas: 3
+          hpa:
+            minReplicas: 3
+            maxReplicas: 10
+        landing:
+          replicas: 2
+      services:
+        api:
+          replicas: 3
+          hpa:
+            minReplicas: 3
+            maxReplicas: 20
+        auth:
+          replicas: 3
+          hpa:
+            minReplicas: 3
+            maxReplicas: 10

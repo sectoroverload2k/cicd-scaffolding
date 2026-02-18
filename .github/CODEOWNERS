@@ -1,0 +1,51 @@
+# CODEOWNERS - Defines code ownership for PR reviews
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# When a PR modifies files matching a pattern, the listed owners are
+# automatically requested for review. This doesn't "lock" files - it
+# ensures the right reviewers see changes.
+#
+# For Triton Agency: Map bot roles to their service areas.
+# The orchestration layer assigns work; CODEOWNERS ensures review routing.
+
+# Default owners (fallback)
+* @platform-team
+
+# ============================================
+# Apps (Frontend/UI)
+# ============================================
+/apps/dashboard/                    @frontend-team
+/apps/landing/                      @frontend-team
+
+# ============================================
+# Services (Backend)
+# ============================================
+/services/api/                      @backend-team
+/services/auth/                     @backend-team
+
+# ============================================
+# Infrastructure
+# ============================================
+/infra/mysql/                       @platform-team
+/infra/redis/                       @platform-team
+/infra/shared/                      @platform-team
+
+# ============================================
+# Contracts (API specs, event schemas)
+# Both teams review - contracts affect everyone
+# ============================================
+/contracts/api/                     @backend-team @frontend-team
+/contracts/events/                  @backend-team
+
+# ============================================
+# CI/CD & Platform Config
+# ============================================
+/.github/                           @platform-team
+/platform/                          @platform-team
+/scripts/                           @platform-team
+/deploy/                            @platform-team
+
+# ============================================
+# Documentation
+# ============================================
+*.md                                @docs-team

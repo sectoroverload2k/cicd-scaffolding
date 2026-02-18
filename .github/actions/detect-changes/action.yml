@@ -1,0 +1,224 @@
+name: 'Detect Changes'
+description: 'Detect which services have changed and their deployment configuration'
+
+inputs:
+  environment:
+    description: 'Target environment (dev, staging, prod)'
+    required: false
+    default: 'dev'
+
+outputs:
+  matrix:
+    description: 'JSON matrix of changed services with deployment config'
+    value: ${{ steps.set-matrix.outputs.matrix }}
+  has_changes:
+    description: 'Whether any services have changes'
+    value: ${{ steps.set-matrix.outputs.has_changes }}
+  changed_services:
+    description: 'Space-separated list of changed service names'
+    value: ${{ steps.set-matrix.outputs.changed_services }}
+  has_kubernetes:
+    description: 'Whether any Kubernetes deployments are needed'
+    value: ${{ steps.set-matrix.outputs.has_kubernetes }}
+  has_server:
+    description: 'Whether any server deployments are needed'
+    value: ${{ steps.set-matrix.outputs.has_server }}
+  has_migrations:
+    description: 'Whether any migrations need to run'
+    value: ${{ steps.set-matrix.outputs.has_migrations }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect changed files
+      id: changes
+      uses: dorny/paths-filter@v3
+      with:
+        filters: |
+          # Apps
+          dashboard:
+            - 'apps/dashboard/**'
+          landing:
+            - 'apps/landing/**'
+          frontend:
+            - 'apps/frontend/**'
+          # Services
+          api:
+            - 'services/api/**'
+          auth:
+            - 'services/auth/**'
+          # Infrastructure
+          mysql:
+            - 'infra/mysql/**'
+          redis:
+            - 'infra/redis/**'
+          # Shared changes trigger rebuild of all
+          shared:
+            - 'infra/shared/**'
+            - '.github/workflows/_*.yml'
+            - 'platform/platform.yaml'
+
+    - name: Build matrix with deployment config
+      id: set-matrix
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        # Initialize arrays
+        declare -a services=()
+        declare -a matrix_items=()
+        HAS_KUBERNETES=false
+        HAS_SERVER=false
+        HAS_MIGRATIONS=false
+
+        # Function to read deploy config
+        get_deploy_config() {
+          local path=$1
+          local env=$ENVIRONMENT
+
+          # Check for deploy.yaml (not .example)
+          if [[ -f "${path}/deploy.yaml" ]]; then
+            local deploy_type=$(grep -E "^type:" "${path}/deploy.yaml" | head -1 | awk '{print $2}' | tr -d '"'"'" || echo "kubernetes")
+            local method=$(grep -E "^method:" "${path}/deploy.yaml" | head -1 | awk '{print $2}' | tr -d '"'"'" || echo "")
+
+            echo "$deploy_type|$method"
+          else
+            # Default to kubernetes if no deploy.yaml
+            echo "kubernetes|"
+          fi
+        }
+
+        # Function to get server deployment config
+        get_server_config() {
+          local path=$1
+          local env=$ENVIRONMENT
+
+          if [[ -f "${path}/deploy.yaml" ]]; then
+            # Extract hosts array for environment
+            local hosts=$(python3 -c "
+        import yaml
+        import json
+        try:
+            with open('${path}/deploy.yaml') as f:
+                config = yaml.safe_load(f)
+            targets = config.get('targets', {}).get('${env}', {})
+            hosts = targets.get('hosts', [])
+            print(json.dumps(hosts))
+        except:
+            print('[]')
+        " 2>/dev/null || echo "[]")
+
+            local deploy_path=$(python3 -c "
+        import yaml
+        try:
+            with open('${path}/deploy.yaml') as f:
+                config = yaml.safe_load(f)
+            targets = config.get('targets', {}).get('${env}', {})
+            print(targets.get('path', '/var/www/app'))
+        except:
+            print('/var/www/app')
+        " 2>/dev/null || echo "/var/www/app")
+
+            echo "${hosts}|${deploy_path}"
+          else
+            echo "[]|/var/www/app"
+          fi
+        }
+
+        # Check each component for changes
+        declare -A COMPONENTS=(
+          ["dashboard"]="apps/dashboard|app"
+          ["landing"]="apps/landing|app"
+          ["frontend"]="apps/frontend|app"
+          ["api"]="services/api|service"
+          ["auth"]="services/auth|service"
+          ["mysql"]="infra/mysql|infra"
+          ["redis"]="infra/redis|infra"
+        )
+
+        for component in "${!COMPONENTS[@]}"; do
+          IFS='|' read -r path comp_type <<< "${COMPONENTS[$component]}"
+
+          # Check if this component changed
+          changed_var="steps.changes.outputs.${component}"
+          is_changed="${{ steps.changes.outputs.dashboard }}"  # Will be overwritten below
+
+          # Use indirect reference for the change status
+          case "$component" in
+            dashboard) is_changed="${{ steps.changes.outputs.dashboard }}" ;;
+            landing) is_changed="${{ steps.changes.outputs.landing }}" ;;
+            frontend) is_changed="${{ steps.changes.outputs.frontend }}" ;;
+            api) is_changed="${{ steps.changes.outputs.api }}" ;;
+            auth) is_changed="${{ steps.changes.outputs.auth }}" ;;
+            mysql) is_changed="${{ steps.changes.outputs.mysql }}" ;;
+            redis) is_changed="${{ steps.changes.outputs.redis }}" ;;
+          esac
+
+          shared_changed="${{ steps.changes.outputs.shared }}"
+
+          if [[ "$is_changed" == "true" ]] || [[ "$shared_changed" == "true" ]]; then
+            # Check if component exists (has VERSION, package.json, or deploy.yaml)
+            if [[ -f "${path}/VERSION" ]] || [[ -f "${path}/package.json" ]] || [[ -f "${path}/deploy.yaml" ]]; then
+
+              # Get deployment configuration
+              IFS='|' read -r deploy_type method <<< "$(get_deploy_config "$path")"
+
+              services+=("$component")
+
+              case "$deploy_type" in
+                kubernetes)
+                  HAS_KUBERNETES=true
+                  matrix_items+=("{\"service\":\"${component}\",\"path\":\"${path}\",\"type\":\"${comp_type}\",\"deploy_type\":\"kubernetes\"}")
+                  ;;
+                server)
+                  HAS_SERVER=true
+                  IFS='|' read -r hosts deploy_path <<< "$(get_server_config "$path")"
+                  matrix_items+=("{\"service\":\"${component}\",\"path\":\"${path}\",\"type\":\"${comp_type}\",\"deploy_type\":\"server\",\"method\":\"${method:-rsync}\",\"hosts\":${hosts},\"deploy_path\":\"${deploy_path}\"}")
+                  ;;
+                migration)
+                  HAS_MIGRATIONS=true
+                  matrix_items+=("{\"service\":\"${component}\",\"path\":\"${path}\",\"type\":\"${comp_type}\",\"deploy_type\":\"migration\"}")
+                  ;;
+                static)
+                  matrix_items+=("{\"service\":\"${component}\",\"path\":\"${path}\",\"type\":\"${comp_type}\",\"deploy_type\":\"static\"}")
+                  ;;
+                *)
+                  # Default to kubernetes
+                  HAS_KUBERNETES=true
+                  matrix_items+=("{\"service\":\"${component}\",\"path\":\"${path}\",\"type\":\"${comp_type}\",\"deploy_type\":\"kubernetes\"}")
+                  ;;
+              esac
+            fi
+          fi
+        done
+
+        # Build JSON matrix
+        if [[ ${#matrix_items[@]} -gt 0 ]]; then
+          matrix_json=$(printf '%s\n' "${matrix_items[@]}" | jq -s '{"include": .}')
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "changed_services=${services[*]}" >> $GITHUB_OUTPUT
+        else
+          echo 'matrix={"include":[]}' >> $GITHUB_OUTPUT
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "changed_services=" >> $GITHUB_OUTPUT
+        fi
+
+        echo "has_kubernetes=$HAS_KUBERNETES" >> $GITHUB_OUTPUT
+        echo "has_server=$HAS_SERVER" >> $GITHUB_OUTPUT
+        echo "has_migrations=$HAS_MIGRATIONS" >> $GITHUB_OUTPUT
+
+        # Log detected changes
+        echo "### Detected Changes" >> $GITHUB_STEP_SUMMARY
+        if [[ ${#services[@]} -gt 0 ]]; then
+          echo "| Service | Path | Deploy Type |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|------|-------------|" >> $GITHUB_STEP_SUMMARY
+          for item in "${matrix_items[@]}"; do
+            svc=$(echo "$item" | jq -r '.service')
+            path=$(echo "$item" | jq -r '.path')
+            dtype=$(echo "$item" | jq -r '.deploy_type')
+            echo "| $svc | $path | $dtype |" >> $GITHUB_STEP_SUMMARY
+          done
+        else
+          echo "No service changes detected" >> $GITHUB_STEP_SUMMARY
+        fi

@@ -1,0 +1,141 @@
+name: Build Service
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+        description: 'Service name'
+      service-path:
+        required: true
+        type: string
+        description: 'Path to service (e.g., apps/dashboard, services/api)'
+      version-suffix:
+        required: false
+        type: string
+        default: ''
+        description: 'Version suffix (beta.N, rc.N, or empty for production)'
+      registry:
+        required: false
+        type: string
+        default: 'ghcr.io'
+        description: 'Container registry'
+      push:
+        required: false
+        type: boolean
+        default: true
+        description: 'Push image to registry'
+    outputs:
+      version:
+        description: 'Full version string'
+        value: ${{ jobs.build.outputs.version }}
+      image:
+        description: 'Full image name with tag'
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: 'Image digest'
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build-push.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+
+          # Read base version from VERSION file or package.json
+          if [[ -f "${SERVICE_PATH}/VERSION" ]]; then
+            BASE_VERSION=$(cat "${SERVICE_PATH}/VERSION" | tr -d '[:space:]')
+          elif [[ -f "${SERVICE_PATH}/package.json" ]]; then
+            BASE_VERSION=$(jq -r '.version' "${SERVICE_PATH}/package.json")
+          else
+            echo "::error::No VERSION file or package.json found in ${SERVICE_PATH}"
+            exit 1
+          fi
+
+          # Apply version suffix if provided
+          if [[ -n "${{ inputs.version-suffix }}" ]]; then
+            FULL_VERSION="${BASE_VERSION}-${{ inputs.version-suffix }}"
+          else
+            FULL_VERSION="${BASE_VERSION}"
+          fi
+
+          echo "base_version=${BASE_VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${FULL_VERSION}" >> $GITHUB_OUTPUT
+
+          echo "### Version Info" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: ${{ inputs.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Base version: ${BASE_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- Full version: ${FULL_VERSION}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.registry }}/${{ github.repository }}/${{ inputs.service }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable=${{ inputs.version-suffix == '' }}
+            type=sha,prefix=
+
+      - name: Build and push
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.service-path }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Create git tag
+        if: inputs.push
+        run: |
+          TAG="${{ inputs.service }}/v${{ steps.version.outputs.version }}"
+
+          # Check if tag already exists
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release ${{ inputs.service }} v${{ steps.version.outputs.version }}"
+            git push origin "$TAG"
+            echo "Created tag: $TAG" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Output summary
+        run: |
+          echo "### Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Digest: ${{ steps.build-push.outputs.digest }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,32 @@
+# Frontend PHP Application - Server Deployment
+# Deploys to Apache/Nginx servers via SSH/rsync
+
+type: server
+method: rsync
+
+# Environment-specific targets
+targets:
+  dev:
+    hosts:
+      - web1.dev.example.com
+    path: /var/www/frontend
+
+  staging:
+    hosts:
+      - web1.staging.example.com
+      - web2.staging.example.com
+    path: /var/www/frontend
+
+  prod:
+    hosts:
+      - web1.example.com
+      - web2.example.com
+      - web3.example.com
+    path: /var/www/frontend
+
+# Post-deploy commands (customize for your stack)
+# post_deploy:
+#   - composer install --no-dev
+#   - npm run build
+#   - sudo systemctl reload php-fpm
+#   - sudo systemctl reload apache2

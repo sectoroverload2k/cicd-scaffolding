@@ -1,0 +1,98 @@
+# Component Dependency Matrix
+# Defines inter-service dependencies and version compatibility rules.
+# Used by validate-platform.sh to verify deployments.
+
+version: "1.0"
+
+# Dependency definitions
+# Format: component -> list of required dependencies with version constraints
+dependencies:
+  # API service dependencies
+  api:
+    - name: auth
+      constraint: ">=1.0.0"
+      type: required
+      description: "API requires auth service for token validation"
+    - name: mysql
+      constraint: ">=8.0"
+      type: required
+      description: "API requires MySQL for data persistence"
+    - name: redis
+      constraint: ">=7.0"
+      type: optional
+      description: "API uses Redis for caching (optional)"
+
+  # Auth service dependencies
+  auth:
+    - name: mysql
+      constraint: ">=8.0"
+      type: required
+      description: "Auth stores user credentials in MySQL"
+    - name: redis
+      constraint: ">=7.0"
+      type: optional
+      description: "Auth uses Redis for session storage"
+
+  # Dashboard app dependencies
+  dashboard:
+    - name: api
+      constraint: ">=1.0.0"
+      type: required
+      description: "Dashboard consumes API endpoints"
+
+  # Landing app dependencies
+  landing:
+    - name: api
+      constraint: ">=1.0.0"
+      type: optional
+      description: "Landing page may call API for dynamic content"
+
+# Breaking changes registry
+# Documents known breaking changes between versions
+breaking_changes:
+  api:
+    - from_version: "1.x"
+      to_version: "2.0.0"
+      description: "REST API v1 endpoints removed"
+      migration_guide: "Update all clients to use /api/v2 endpoints"
+      affected_components:
+        - dashboard
+        - landing
+
+  auth:
+    - from_version: "1.0.x"
+      to_version: "1.1.0"
+      description: "JWT token format changed"
+      migration_guide: "All services must update JWT validation logic"
+      affected_components:
+        - api
+
+# Upgrade paths
+# Defines safe upgrade sequences for major version bumps
+upgrade_paths:
+  api:
+    "1.x_to_2.x":
+      steps:
+        - "Deploy API v2 alongside v1"
+        - "Update dashboard to use v2 endpoints"
+        - "Monitor for errors"
+        - "Remove API v1"
+      rollback: "Redeploy API v1, revert dashboard"
+
+# Health check requirements
+# Each component must expose these endpoints
+health_checks:
+  required:
+    - endpoint: "/health"
+      method: "GET"
+      expected_status: 200
+      timeout_ms: 5000
+  optional:
+    - endpoint: "/ready"
+      method: "GET"
+      expected_status: 200
+      timeout_ms: 10000
+    - endpoint: "/metrics"
+      method: "GET"
+      expected_status: 200
+      timeout_ms: 5000

@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/events/user-created.json",
+  "title": "UserCreated",
+  "description": "Event emitted when a new user is created. Subscribe to this event to react to new user registrations.",
+  "type": "object",
+  "required": ["eventId", "eventType", "timestamp", "version", "data"],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this event instance",
+      "examples": ["550e8400-e29b-41d4-a716-446655440000"]
+    },
+    "eventType": {
+      "type": "string",
+      "const": "user.created",
+      "description": "Event type identifier"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the event occurred",
+      "examples": ["2024-01-15T10:30:00Z"]
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version for this event type",
+      "examples": ["1.0.0"]
+    },
+    "source": {
+      "type": "string",
+      "description": "Service that emitted this event",
+      "examples": ["auth-service"]
+    },
+    "correlationId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "ID to correlate related events across services"
+    },
+    "data": {
+      "type": "object",
+      "description": "Event payload",
+      "required": ["userId", "email"],
+      "properties": {
+        "userId": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Unique identifier of the created user",
+          "examples": [12345]
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Email address of the created user",
+          "examples": ["user@example.com"]
+        },
+        "firstName": {
+          "type": "string",
+          "description": "User's first name",
+          "examples": ["John"]
+        },
+        "lastName": {
+          "type": "string",
+          "description": "User's last name",
+          "examples": ["Doe"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "active"],
+          "description": "Initial status of the user",
+          "examples": ["pending"]
+        },
+        "registrationSource": {
+          "type": "string",
+          "enum": ["web", "mobile", "api", "admin"],
+          "description": "How the user registered",
+          "examples": ["web"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional context about the event",
+      "properties": {
+        "ipAddress": {
+          "type": "string",
+          "format": "ipv4",
+          "description": "IP address of the registration request"
+        },
+        "userAgent": {
+          "type": "string",
+          "description": "User agent string from the registration request"
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "eventId": "550e8400-e29b-41d4-a716-446655440000",
+      "eventType": "user.created",
+      "timestamp": "2024-01-15T10:30:00Z",
+      "version": "1.0.0",
+      "source": "auth-service",
+      "correlationId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "data": {
+        "userId": 12345,
+        "email": "user@example.com",
+        "firstName": "John",
+        "lastName": "Doe",
+        "status": "pending",
+        "registrationSource": "web"
+      },
+      "metadata": {
+        "ipAddress": "192.168.1.1",
+        "userAgent": "Mozilla/5.0..."
+      }
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+---
+# Flyway Migration Job
+# Runs database migrations before application deployment
+#
+# Usage:
+# 1. SQL files are mounted from a ConfigMap (created during deployment)
+# 2. Job runs Flyway migrate command
+# 3. Deployment waits for Job completion
+#
+# For ArgoCD, the PreSync hook annotation ensures migrations run before app sync
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flyway-migrate
+  labels:
+    app: flyway-migrate
+    component: database
+  annotations:
+    # ArgoCD hook for app-of-apps pattern
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  # Job will be cleaned up after completion
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: flyway-migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: flyway
+          image: flyway/flyway:10
+          args:
+            - migrate
+            - -validateMigrationNaming=true
+          env:
+            # Database connection URL
+            - name: FLYWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: flyway-config
+                  key: FLYWAY_URL
+            # Database username
+            - name: FLYWAY_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: username
+            # Database password
+            - name: FLYWAY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: password
+            # Flyway configuration
+            - name: FLYWAY_BASELINE_ON_MIGRATE
+              value: "true"
+            - name: FLYWAY_LOCATIONS
+              value: "filesystem:/flyway/sql"
+            # Connect timeout
+            - name: FLYWAY_CONNECT_RETRIES
+              value: "10"
+            - name: FLYWAY_CONNECT_RETRIES_INTERVAL
+              value: "5"
+          volumeMounts:
+            - name: migrations
+              mountPath: /flyway/sql
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        # Migration SQL files mounted from ConfigMap
+        - name: migrations
+          configMap:
+            name: flyway-migrations
+---
+# ConfigMap for Flyway configuration
+# Database URL is environment-specific, set in overlays
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flyway-config
+  labels:
+    app: flyway-migrate
+data:
+  # Placeholder - overridden in environment overlays
+  FLYWAY_URL: "jdbc:mysql://mysql:3306/myapp"

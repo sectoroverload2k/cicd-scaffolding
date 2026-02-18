@@ -1,0 +1,9 @@
+# Deploy configuration for API service
+# Rename to deploy.yaml and customize for your environment
+
+type: kubernetes
+
+# Run database migrations before deploying
+migrations:
+  enabled: true
+  path: infra/mysql/migrations

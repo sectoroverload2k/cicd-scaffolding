@@ -1,0 +1,24 @@
+type: server
+method: rsync
+
+# Hugo builds to public/ - that's what gets deployed
+build:
+  command: hugo --minify
+  output: public
+
+targets:
+  dev:
+    hosts:
+      - web1.dev.example.com
+    path: /var/www/hugo-site
+
+  staging:
+    hosts:
+      - web1.staging.example.com
+    path: /var/www/hugo-site
+
+  prod:
+    hosts:
+      - web1.example.com
+      - web2.example.com
+    path: /var/www/hugo-site

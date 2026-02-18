@@ -1,0 +1,219 @@
+name: Deploy to Server
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+        description: 'Service name'
+      service-path:
+        required: true
+        type: string
+        description: 'Path to service (e.g., apps/dashboard)'
+      environment:
+        required: true
+        type: string
+        description: 'Target environment (dev, staging, prod)'
+      version:
+        required: true
+        type: string
+        description: 'Version being deployed'
+      hosts:
+        required: true
+        type: string
+        description: 'JSON array of target hosts'
+      deploy-path:
+        required: true
+        type: string
+        description: 'Path on target server (e.g., /var/www/app)'
+      method:
+        required: false
+        type: string
+        default: 'rsync'
+        description: 'Deployment method: rsync or codedeploy'
+    secrets:
+      SSH_PRIVATE_KEY:
+        required: true
+        description: 'SSH private key for server access'
+      SSH_USER:
+        required: false
+        description: 'SSH username (default: deploy)'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment == 'staging' && 'staging' || 'development' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          # Parse hosts and add to known_hosts
+          HOSTS='${{ inputs.hosts }}'
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          done
+
+      - name: Prepare deployment package
+        id: package
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          DEPLOY_DIR="/tmp/deploy-package"
+
+          mkdir -p "$DEPLOY_DIR"
+
+          # Copy application files (exclude dev/test files)
+          rsync -av --exclude='.git' \
+                    --exclude='node_modules' \
+                    --exclude='vendor' \
+                    --exclude='tests' \
+                    --exclude='*.test.*' \
+                    --exclude='.env*' \
+                    --exclude='docker-compose*' \
+                    --exclude='Dockerfile' \
+                    --exclude='k8s' \
+                    --exclude='deploy.yaml' \
+                    "$SERVICE_PATH/" "$DEPLOY_DIR/"
+
+          # Create version file
+          echo "${{ inputs.version }}" > "$DEPLOY_DIR/VERSION"
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DEPLOY_DIR/DEPLOYED_AT"
+
+          # Create deployment manifest
+          cat > "$DEPLOY_DIR/.deployment" << EOF
+          {
+            "service": "${{ inputs.service }}",
+            "version": "${{ inputs.version }}",
+            "environment": "${{ inputs.environment }}",
+            "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "deployed_by": "github-actions"
+          }
+          EOF
+
+          echo "package_dir=$DEPLOY_DIR" >> $GITHUB_OUTPUT
+
+      - name: Deploy via rsync
+        if: inputs.method == 'rsync'
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          DEPLOY_PATH="${{ inputs.deploy-path }}"
+          PACKAGE_DIR="${{ steps.package.outputs.package_dir }}"
+          HOSTS='${{ inputs.hosts }}'
+
+          # Deploy to each host
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            echo "Deploying to $HOST..."
+
+            # Create backup of current deployment
+            ssh "$SSH_USER@$HOST" "
+              if [ -d '$DEPLOY_PATH' ]; then
+                sudo cp -r '$DEPLOY_PATH' '${DEPLOY_PATH}.backup.\$(date +%Y%m%d%H%M%S)' || true
+              fi
+              sudo mkdir -p '$DEPLOY_PATH'
+              sudo chown $SSH_USER:$SSH_USER '$DEPLOY_PATH'
+            "
+
+            # Sync files
+            rsync -avz --delete \
+                  --exclude='.env' \
+                  --exclude='storage' \
+                  --exclude='logs' \
+                  --exclude='cache' \
+                  "$PACKAGE_DIR/" "$SSH_USER@$HOST:$DEPLOY_PATH/"
+
+            # Post-deployment commands
+            ssh "$SSH_USER@$HOST" "
+              cd '$DEPLOY_PATH'
+
+              # PHP: Install composer dependencies if composer.json exists
+              if [ -f 'composer.json' ]; then
+                composer install --no-dev --optimize-autoloader 2>/dev/null || true
+              fi
+
+              # Node: Install dependencies if package.json exists
+              if [ -f 'package.json' ]; then
+                npm ci --production 2>/dev/null || true
+              fi
+
+              # Set permissions
+              sudo chown -R www-data:www-data '$DEPLOY_PATH' 2>/dev/null || true
+              sudo chmod -R 755 '$DEPLOY_PATH' 2>/dev/null || true
+
+              # Restart PHP-FPM if available
+              sudo systemctl reload php*-fpm 2>/dev/null || true
+
+              # Restart Apache if available
+              sudo systemctl reload apache2 2>/dev/null || true
+              sudo systemctl reload httpd 2>/dev/null || true
+
+              echo 'Deployment complete on $HOST'
+            "
+
+            echo "Deployed to $HOST successfully"
+          done
+
+      - name: Verify deployment
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          DEPLOY_PATH="${{ inputs.deploy-path }}"
+          HOSTS='${{ inputs.hosts }}'
+          ALL_SUCCESS=true
+
+          echo "### Deployment Verification" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            # Check version file
+            DEPLOYED_VERSION=$(ssh "$SSH_USER@$HOST" "cat '$DEPLOY_PATH/VERSION' 2>/dev/null" || echo "unknown")
+
+            if [[ "$DEPLOYED_VERSION" == "${{ inputs.version }}" ]]; then
+              echo "- :white_check_mark: $HOST - v$DEPLOYED_VERSION" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- :x: $HOST - expected v${{ inputs.version }}, got v$DEPLOYED_VERSION" >> $GITHUB_STEP_SUMMARY
+              ALL_SUCCESS=false
+            fi
+          done
+
+          if [[ "$ALL_SUCCESS" != "true" ]]; then
+            echo "::warning::Some deployments may have failed"
+          fi
+
+      - name: Cleanup SSH
+        if: always()
+        run: |
+          rm -f ~/.ssh/id_rsa
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          DEPLOY_PATH="${{ inputs.deploy-path }}"
+          HOSTS='${{ inputs.hosts }}'
+
+          echo "### Rollback" >> $GITHUB_STEP_SUMMARY
+          echo "Attempting rollback due to deployment failure..." >> $GITHUB_STEP_SUMMARY
+
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            echo "Rolling back $HOST..."
+            ssh "$SSH_USER@$HOST" "
+              LATEST_BACKUP=\$(ls -td '${DEPLOY_PATH}.backup.'* 2>/dev/null | head -1)
+              if [ -n \"\$LATEST_BACKUP\" ]; then
+                sudo rm -rf '$DEPLOY_PATH'
+                sudo mv \"\$LATEST_BACKUP\" '$DEPLOY_PATH'
+                echo 'Rolled back to previous version'
+              else
+                echo 'No backup found for rollback'
+              fi
+            " || true
+          done

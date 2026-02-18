@@ -1,0 +1,19 @@
+type: server
+method: rsync
+
+targets:
+  dev:
+    hosts:
+      - web1.dev.example.com
+    path: /var/www/coming-soon
+
+  staging:
+    hosts:
+      - web1.staging.example.com
+    path: /var/www/coming-soon
+
+  prod:
+    hosts:
+      - web1.example.com
+      - web2.example.com
+    path: /var/www/coming-soon

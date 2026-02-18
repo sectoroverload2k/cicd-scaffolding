@@ -1,0 +1,18 @@
+<?php
+/**
+ * Example PHP frontend entry point
+ */
+
+// Health check endpoint
+if ($_SERVER['REQUEST_URI'] === '/health') {
+    header('Content-Type: application/json');
+    echo json_encode([
+        'status' => 'ok',
+        'version' => trim(file_get_contents(__DIR__ . '/../VERSION')),
+        'timestamp' => date('c')
+    ]);
+    exit;
+}
+
+// Your application code here
+require_once __DIR__ . '/../src/bootstrap.php';

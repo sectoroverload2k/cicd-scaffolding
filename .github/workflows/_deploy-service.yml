@@ -1,0 +1,201 @@
+name: Deploy Service
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+        description: 'Service name'
+      service-path:
+        required: true
+        type: string
+        description: 'Path to service (e.g., apps/dashboard, services/api)'
+      environment:
+        required: true
+        type: string
+        description: 'Target environment (dev, staging, prod)'
+      image-tag:
+        required: true
+        type: string
+        description: 'Full image tag to deploy'
+      registry:
+        required: false
+        type: string
+        default: 'ghcr.io'
+        description: 'Container registry'
+      run-migrations:
+        required: false
+        type: boolean
+        default: false
+        description: 'Run database migrations before deploy'
+    secrets:
+      KUBECONFIG:
+        required: true
+        description: 'Base64 encoded kubeconfig'
+      MYSQL_PASSWORD:
+        required: false
+        description: 'MySQL password for secret substitution'
+      JWT_SECRET:
+        required: false
+        description: 'JWT secret for secret substitution'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment == 'staging' && 'staging' || 'development' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: '5.3.0'
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify cluster connection
+        run: |
+          kubectl cluster-info
+          kubectl get namespaces
+
+      - name: Run database migrations
+        if: inputs.run-migrations
+        run: |
+          echo "### Running Migrations" >> $GITHUB_STEP_SUMMARY
+
+          # Check if migrations exist for this service
+          MIGRATION_PATH="infra/mysql/migrations"
+          if [[ -d "$MIGRATION_PATH" ]]; then
+            # Create ConfigMap from SQL files
+            kubectl create configmap flyway-migrations \
+              --from-file="$MIGRATION_PATH" \
+              --namespace=${{ inputs.environment }} \
+              --dry-run=client -o yaml | kubectl apply -f -
+
+            # Apply migration job
+            kubectl apply -f infra/mysql/k8s/overlays/${{ inputs.environment }}/
+
+            # Wait for migration to complete
+            kubectl wait --for=condition=complete \
+              job/flyway-migrate \
+              --namespace=${{ inputs.environment }} \
+              --timeout=300s
+
+            echo "- Migrations completed successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- No migrations found, skipping" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Substitute secrets in manifests
+        run: |
+          OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+
+          # Check for secret templates
+          if [[ -f "${OVERLAY_PATH}/secret.yaml" ]]; then
+            envsubst < "${OVERLAY_PATH}/secret.yaml" > /tmp/secret.yaml
+            mv /tmp/secret.yaml "${OVERLAY_PATH}/secret.yaml"
+            echo "Substituted secrets in ${OVERLAY_PATH}/secret.yaml"
+          fi
+        env:
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+
+      - name: Update image in Kustomize
+        run: |
+          OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+
+          if [[ ! -d "$OVERLAY_PATH" ]]; then
+            echo "::error::Overlay path not found: $OVERLAY_PATH"
+            exit 1
+          fi
+
+          cd "$OVERLAY_PATH"
+
+          # Update the image reference
+          IMAGE="${{ inputs.registry }}/${{ github.repository }}/${{ inputs.service }}"
+          kustomize edit set image "${{ inputs.service }}=${IMAGE}:${{ inputs.image-tag }}"
+
+          echo "Updated image to: ${IMAGE}:${{ inputs.image-tag }}"
+
+      - name: Build manifests
+        id: kustomize
+        run: |
+          OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+
+          # Build the manifests
+          kustomize build "$OVERLAY_PATH" > /tmp/manifests.yaml
+
+          echo "### Generated Manifests" >> $GITHUB_STEP_SUMMARY
+          echo '```yaml' >> $GITHUB_STEP_SUMMARY
+          head -100 /tmp/manifests.yaml >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f /tmp/manifests.yaml
+
+          echo "### Applied Manifests" >> $GITHUB_STEP_SUMMARY
+          echo "- Environment: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: ${{ inputs.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: ${{ inputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Wait for rollout
+        run: |
+          NAMESPACE="${{ inputs.environment }}"
+
+          # Get the deployment name (usually matches service name)
+          DEPLOYMENT="${{ inputs.service }}"
+
+          echo "Waiting for deployment $DEPLOYMENT to roll out..."
+
+          kubectl rollout status deployment/$DEPLOYMENT \
+            --namespace=$NAMESPACE \
+            --timeout=300s
+
+          echo "### Rollout Complete" >> $GITHUB_STEP_SUMMARY
+          kubectl get deployment $DEPLOYMENT -n $NAMESPACE -o wide >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify deployment
+        run: |
+          NAMESPACE="${{ inputs.environment }}"
+          DEPLOYMENT="${{ inputs.service }}"
+
+          # Get pod status
+          echo "### Pod Status" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n $NAMESPACE -l app=$DEPLOYMENT -o wide >> $GITHUB_STEP_SUMMARY
+
+          # Check for ready pods
+          READY_PODS=$(kubectl get deployment $DEPLOYMENT -n $NAMESPACE -o jsonpath='{.status.readyReplicas}')
+          DESIRED_PODS=$(kubectl get deployment $DEPLOYMENT -n $NAMESPACE -o jsonpath='{.spec.replicas}')
+
+          if [[ "$READY_PODS" != "$DESIRED_PODS" ]]; then
+            echo "::warning::Only $READY_PODS of $DESIRED_PODS pods are ready"
+          fi
+
+      - name: Cleanup on failure
+        if: failure()
+        run: |
+          echo "### Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "Rolling back..." >> $GITHUB_STEP_SUMMARY
+
+          NAMESPACE="${{ inputs.environment }}"
+          DEPLOYMENT="${{ inputs.service }}"
+
+          # Attempt rollback
+          kubectl rollout undo deployment/$DEPLOYMENT -n $NAMESPACE || true
+
+          # Get logs from failing pods
+          echo "### Pod Logs" >> $GITHUB_STEP_SUMMARY
+          kubectl logs -n $NAMESPACE -l app=$DEPLOYMENT --tail=50 >> $GITHUB_STEP_SUMMARY || true

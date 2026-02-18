@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: php-api-config
+data:
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+  LOG_LEVEL: "info"

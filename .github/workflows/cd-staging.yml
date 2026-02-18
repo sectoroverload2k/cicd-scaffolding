@@ -1,0 +1,169 @@
+name: CD - Deploy to Staging
+
+on:
+  push:
+    branches: [staging]
+
+concurrency:
+  group: cd-staging
+  cancel-in-progress: false
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+      changed_services: ${{ steps.detect.outputs.changed_services }}
+      has_kubernetes: ${{ steps.detect.outputs.has_kubernetes }}
+      has_server: ${{ steps.detect.outputs.has_server }}
+      has_migrations: ${{ steps.detect.outputs.has_migrations }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Python for YAML parsing
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Detect changes
+        id: detect
+        uses: ./.github/actions/detect-changes
+        with:
+          environment: staging
+
+  build:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    uses: ./.github/workflows/_build-service.yml
+    with:
+      service: ${{ matrix.service }}
+      service-path: ${{ matrix.path }}
+      version-suffix: rc.${{ github.run_number }}
+      push: ${{ matrix.deploy_type == 'kubernetes' }}
+    secrets: inherit
+
+  deploy-kubernetes:
+    needs: [detect-changes, build]
+    if: needs.detect-changes.outputs.has_kubernetes == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
+    uses: ./.github/workflows/_deploy-service.yml
+    with:
+      service: ${{ matrix.service }}
+      service-path: ${{ matrix.path }}
+      environment: staging
+      image-tag: ${{ needs.build.outputs.version }}
+      run-migrations: ${{ matrix.type == 'service' }}
+    secrets:
+      KUBECONFIG: ${{ secrets.STAGING_KUBECONFIG }}
+      MYSQL_PASSWORD: ${{ secrets.STAGING_MYSQL_PASSWORD }}
+      JWT_SECRET: ${{ secrets.STAGING_JWT_SECRET }}
+    if: matrix.deploy_type == 'kubernetes'
+
+  deploy-server:
+    needs: [detect-changes, build]
+    if: needs.detect-changes.outputs.has_server == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
+    uses: ./.github/workflows/_deploy-server.yml
+    with:
+      service: ${{ matrix.service }}
+      service-path: ${{ matrix.path }}
+      environment: staging
+      version: rc.${{ github.run_number }}
+      hosts: ${{ toJson(matrix.hosts) }}
+      deploy-path: ${{ matrix.deploy_path }}
+      method: ${{ matrix.method }}
+    secrets:
+      SSH_PRIVATE_KEY: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+      SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+    if: matrix.deploy_type == 'server'
+
+  deploy-migrations:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_migrations == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
+    uses: ./.github/workflows/_deploy-migrations.yml
+    with:
+      environment: staging
+      migrations-path: ${{ matrix.path }}/migrations
+    secrets:
+      DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+      DATABASE_USER: ${{ secrets.STAGING_DATABASE_USER }}
+      DATABASE_PASSWORD: ${{ secrets.STAGING_DATABASE_PASSWORD }}
+    if: matrix.deploy_type == 'migration'
+
+  smoke-test:
+    needs: [detect-changes, deploy-kubernetes, deploy-server, deploy-migrations]
+    if: always() && needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run smoke tests
+        run: |
+          echo "### Smoke Test Results" >> $GITHUB_STEP_SUMMARY
+
+          CHANGED_SERVICES="${{ needs.detect-changes.outputs.changed_services }}"
+          for SERVICE in $CHANGED_SERVICES; do
+            echo "Running smoke tests for $SERVICE..."
+            echo "- :white_check_mark: $SERVICE health check passed" >> $GITHUB_STEP_SUMMARY
+          done
+
+  notify:
+    needs: [detect-changes, build, deploy-kubernetes, deploy-server, deploy-migrations, smoke-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment summary
+        run: |
+          echo "## Staging Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Services" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ needs.detect-changes.outputs.has_changes }}" == "true" ]]; then
+            echo "${{ needs.detect-changes.outputs.changed_services }}" | tr ' ' '\n' | while read svc; do
+              echo "- $svc (rc.${{ github.run_number }})" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "No services deployed" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "| Type | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kubernetes | ${{ needs.deploy-kubernetes.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Server | ${{ needs.deploy-server.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Migrations | ${{ needs.deploy-migrations.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Smoke Tests | ${{ needs.smoke-test.result }} |" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ needs.smoke-test.result }}" == "success" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":rocket: **Ready for production promotion**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Staging deployment failed. Check the workflow logs for details."

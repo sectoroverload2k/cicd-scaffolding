@@ -1,0 +1,82 @@
+# Deploy Configuration Schema
+# Each deployable component should have a deploy.yaml file
+# that specifies how it should be deployed.
+
+# =============================================================================
+# TYPE: kubernetes
+# For services deployed to Kubernetes clusters
+# =============================================================================
+# type: kubernetes
+#
+# # Optional: Override default Kustomize paths
+# kustomize:
+#   base: k8s/base
+#   overlays: k8s/overlays
+#
+# # Optional: Run migrations before deploy
+# migrations:
+#   enabled: true
+#   path: infra/mysql/migrations
+
+# =============================================================================
+# TYPE: server
+# For applications deployed to traditional servers (Apache, Nginx, etc.)
+# =============================================================================
+# type: server
+# method: rsync          # rsync | codedeploy
+#
+# targets:
+#   dev:
+#     hosts:
+#       - web1.dev.example.com
+#     path: /var/www/myapp
+#     post_deploy:
+#       - composer install --no-dev
+#       - ./bin/migrate.sh        # Your migration script
+#       - sudo systemctl reload php-fpm
+#
+#   staging:
+#     hosts:
+#       - web1.staging.example.com
+#       - web2.staging.example.com
+#     path: /var/www/myapp
+#
+#   prod:
+#     hosts:
+#       - web1.example.com
+#       - web2.example.com
+#       - web3.example.com
+#     path: /var/www/myapp
+
+# =============================================================================
+# TYPE: migration
+# For database migrations only (RDS, Cloud SQL, etc.)
+# No application deployment - just schema changes
+# =============================================================================
+# type: migration
+# engine: flyway          # flyway | liquibase
+# path: migrations        # Relative path to migration files
+#
+# # Connection configured via GitHub Secrets:
+# # - DEV_DATABASE_URL, DEV_DATABASE_USER, DEV_DATABASE_PASSWORD
+# # - STAGING_DATABASE_URL, STAGING_DATABASE_USER, STAGING_DATABASE_PASSWORD
+# # - PROD_DATABASE_URL, PROD_DATABASE_USER, PROD_DATABASE_PASSWORD
+
+# =============================================================================
+# TYPE: static
+# For static sites deployed to S3/CloudFront, Netlify, etc.
+# =============================================================================
+# type: static
+# method: s3              # s3 | netlify | cloudflare-pages
+#
+# build:
+#   command: npm run build
+#   output: dist
+#
+# targets:
+#   dev:
+#     bucket: my-app-dev
+#     cloudfront_distribution: E1234567890
+#   prod:
+#     bucket: my-app-prod
+#     cloudfront_distribution: E0987654321

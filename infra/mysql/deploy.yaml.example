@@ -1,0 +1,29 @@
+# Deploy configuration for MySQL/database
+# Rename to deploy.yaml and customize for your environment
+
+# For AWS RDS, Cloud SQL, or other managed databases
+# This only runs migrations - no container/server deployment
+type: migration
+engine: flyway
+path: migrations
+
+# Connection strings are configured via GitHub Secrets:
+#
+# Required secrets per environment:
+#   DEV_DATABASE_URL      - jdbc:mysql://host:3306/dbname
+#   DEV_DATABASE_USER     - username
+#   DEV_DATABASE_PASSWORD - password
+#
+#   STAGING_DATABASE_URL
+#   STAGING_DATABASE_USER
+#   STAGING_DATABASE_PASSWORD
+#
+#   PROD_DATABASE_URL
+#   PROD_DATABASE_USER
+#   PROD_DATABASE_PASSWORD
+#
+# Example RDS URL:
+#   jdbc:mysql://mydb.abc123.us-east-1.rds.amazonaws.com:3306/myapp
+
+# For Kubernetes-deployed MySQL, use:
+# type: kubernetes

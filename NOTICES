@@ -1,0 +1,81 @@
+THIRD-PARTY SOFTWARE NOTICES
+
+This project uses the following open source software during build and deployment.
+These tools are not bundled with this project but are required for CI/CD operations.
+
+================================================================================
+Build & Deployment Tools
+================================================================================
+
+Docker
+  License: Apache License 2.0
+  https://www.docker.com/
+
+Kubernetes (kubectl)
+  License: Apache License 2.0
+  https://kubernetes.io/
+
+Kustomize
+  License: Apache License 2.0
+  https://kustomize.io/
+
+Flyway Community Edition
+  License: Apache License 2.0
+  https://flywaydb.org/
+
+GitHub Actions
+  License: MIT (individual actions vary)
+  https://github.com/features/actions
+
+================================================================================
+GitHub Actions Used
+================================================================================
+
+actions/checkout
+  License: MIT
+  https://github.com/actions/checkout
+
+docker/setup-buildx-action
+  License: Apache License 2.0
+  https://github.com/docker/setup-buildx-action
+
+docker/build-push-action
+  License: Apache License 2.0
+  https://github.com/docker/build-push-action
+
+docker/login-action
+  License: Apache License 2.0
+  https://github.com/docker/login-action
+
+docker/metadata-action
+  License: Apache License 2.0
+  https://github.com/docker/metadata-action
+
+azure/setup-kubectl
+  License: MIT
+  https://github.com/azure/setup-kubectl
+
+dorny/paths-filter
+  License: MIT
+  https://github.com/dorny/paths-filter
+
+softprops/action-gh-release
+  License: MIT
+  https://github.com/softprops/action-gh-release
+
+================================================================================
+Optional Runtime Components (if used in your services)
+================================================================================
+
+When building services on this template, track licenses for:
+- Programming language runtimes (Node.js, PHP, Python, Go, etc.)
+- Frameworks and libraries (Express, Laravel, React, etc.)
+- Databases (MySQL/MariaDB, PostgreSQL, Redis, etc.)
+
+For AMI/container distribution, generate a full dependency list using tools like:
+- npm: `npx license-checker --summary`
+- pip: `pip-licenses`
+- Go: `go-licenses`
+- General: FOSSA, Snyk, or Trivy
+
+================================================================================

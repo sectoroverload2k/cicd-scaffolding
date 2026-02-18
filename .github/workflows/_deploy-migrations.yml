@@ -1,0 +1,150 @@
+name: Deploy Migrations
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: 'Target environment (dev, staging, prod)'
+      migrations-path:
+        required: false
+        type: string
+        default: 'infra/mysql/migrations'
+        description: 'Path to migration files'
+      baseline-version:
+        required: false
+        type: string
+        default: ''
+        description: 'Baseline version for new databases'
+    secrets:
+      DATABASE_URL:
+        required: true
+        description: 'JDBC connection URL (jdbc:mysql://host:port/database)'
+      DATABASE_USER:
+        required: true
+        description: 'Database username'
+      DATABASE_PASSWORD:
+        required: true
+        description: 'Database password'
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment == 'staging' && 'staging' || 'development' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for migrations
+        id: check
+        run: |
+          MIGRATIONS_PATH="${{ inputs.migrations-path }}"
+
+          # Count migration files (excluding examples)
+          MIGRATION_COUNT=$(find "$MIGRATIONS_PATH" -name "V*.sql" -type f ! -name "*.example" | wc -l)
+
+          if [[ "$MIGRATION_COUNT" -eq 0 ]]; then
+            echo "has_migrations=false" >> $GITHUB_OUTPUT
+            echo "No migration files found in $MIGRATIONS_PATH"
+          else
+            echo "has_migrations=true" >> $GITHUB_OUTPUT
+            echo "Found $MIGRATION_COUNT migration files"
+          fi
+
+          # Get latest version
+          LATEST_VERSION=$(find "$MIGRATIONS_PATH" -name "V*.sql" -type f ! -name "*.example" | \
+            sed 's/.*V\([0-9]*\)__.*/\1/' | sort -n | tail -1 || echo "000")
+          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Run Flyway migrations
+        if: steps.check.outputs.has_migrations == 'true'
+        run: |
+          # Create temporary config file
+          cat > /tmp/flyway.conf << EOF
+          flyway.url=${{ secrets.DATABASE_URL }}
+          flyway.user=${{ secrets.DATABASE_USER }}
+          flyway.password=${{ secrets.DATABASE_PASSWORD }}
+          flyway.locations=filesystem:${{ inputs.migrations-path }}
+          flyway.baselineOnMigrate=true
+          flyway.validateMigrationNaming=true
+          flyway.connectRetries=10
+          flyway.connectRetriesInterval=5
+          EOF
+
+          # Add baseline version if specified
+          if [[ -n "${{ inputs.baseline-version }}" ]]; then
+            echo "flyway.baselineVersion=${{ inputs.baseline-version }}" >> /tmp/flyway.conf
+          fi
+
+          # Run Flyway in Docker
+          docker run --rm \
+            -v "$(pwd)/${{ inputs.migrations-path }}:/flyway/sql:ro" \
+            -v "/tmp/flyway.conf:/flyway/conf/flyway.conf:ro" \
+            --network host \
+            flyway/flyway:10 \
+            info
+
+          echo "### Migration Info" >> $GITHUB_STEP_SUMMARY
+
+          # Capture info output
+          docker run --rm \
+            -v "$(pwd)/${{ inputs.migrations-path }}:/flyway/sql:ro" \
+            -v "/tmp/flyway.conf:/flyway/conf/flyway.conf:ro" \
+            --network host \
+            flyway/flyway:10 \
+            info 2>&1 | tee /tmp/flyway-info.txt
+
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/flyway-info.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Run migrations
+          echo ""
+          echo "Running migrations..."
+
+          docker run --rm \
+            -v "$(pwd)/${{ inputs.migrations-path }}:/flyway/sql:ro" \
+            -v "/tmp/flyway.conf:/flyway/conf/flyway.conf:ro" \
+            --network host \
+            flyway/flyway:10 \
+            migrate
+
+      - name: Verify migrations
+        if: steps.check.outputs.has_migrations == 'true'
+        run: |
+          echo "### Migration Results" >> $GITHUB_STEP_SUMMARY
+
+          # Run info again to show final state
+          docker run --rm \
+            -v "$(pwd)/${{ inputs.migrations-path }}:/flyway/sql:ro" \
+            -v "/tmp/flyway.conf:/flyway/conf/flyway.conf:ro" \
+            --network host \
+            flyway/flyway:10 \
+            info 2>&1 | tee /tmp/flyway-final.txt
+
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/flyway-final.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Check for pending migrations
+          if grep -q "Pending" /tmp/flyway-final.txt; then
+            echo "::warning::Some migrations are still pending"
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":warning: Some migrations are still pending" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":white_check_mark: All migrations applied successfully" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Skip message
+        if: steps.check.outputs.has_migrations == 'false'
+        run: |
+          echo "### Migrations" >> $GITHUB_STEP_SUMMARY
+          echo "No migration files found - skipping" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f /tmp/flyway.conf /tmp/flyway-info.txt /tmp/flyway-final.txt

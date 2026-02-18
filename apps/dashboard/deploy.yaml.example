@@ -1,0 +1,47 @@
+# Deploy configuration for dashboard app
+# Rename to deploy.yaml and customize for your environment
+
+# Option 1: Deploy to Kubernetes (default)
+type: kubernetes
+
+# Option 2: Deploy to traditional servers
+# type: server
+# method: rsync
+#
+# targets:
+#   dev:
+#     hosts:
+#       - web1.dev.example.com
+#     path: /var/www/dashboard
+#     post_deploy:
+#       - npm install --production
+#       - pm2 restart dashboard
+#
+#   staging:
+#     hosts:
+#       - web1.staging.example.com
+#       - web2.staging.example.com
+#     path: /var/www/dashboard
+#
+#   prod:
+#     hosts:
+#       - web1.example.com
+#       - web2.example.com
+#       - web3.example.com
+#     path: /var/www/dashboard
+
+# Option 3: Deploy static build to S3/CloudFront
+# type: static
+# method: s3
+#
+# build:
+#   command: npm run build
+#   output: dist
+#
+# targets:
+#   dev:
+#     bucket: dashboard-dev
+#     cloudfront_distribution: E1234567890
+#   prod:
+#     bucket: dashboard-prod
+#     cloudfront_distribution: E0987654321
