@@ -256,16 +256,38 @@ ${BLUE}Workflow:${NC}
   3. Merge develop to 'staging' → builds RC versions, auto-deploys to staging
   4. Merge staging to 'main' → builds production versions, requires approval
 
+${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
 ${BLUE}Next steps:${NC}
 
-  1. Configure GitHub Secrets for each environment:
-     - DEV_KUBECONFIG, STAGING_KUBECONFIG, PROD_KUBECONFIG
-     - *_MYSQL_PASSWORD, *_JWT_SECRET, etc.
+  ${GREEN}1. Create GitHub Environments${NC}
+     Go to: ${YELLOW}GitHub repo → Settings → Environments${NC}
+     Create three environments:
+       • development  (auto-deploys, no approval needed)
+       • staging      (auto-deploys, no approval needed)
+       • production   (add yourself as required reviewer)
 
-  2. Configure production environment protection rules:
-     Settings > Environments > production > Required reviewers
+  ${GREEN}2. Add Secrets${NC}
+     Go to: ${YELLOW}GitHub repo → Settings → Secrets and variables → Actions${NC}
+     Add secrets based on your deployment type:
 
-  3. Start developing:
+     ${BLUE}For Kubernetes:${NC}
+       DEV_KUBECONFIG, STAGING_KUBECONFIG, PROD_KUBECONFIG
+       (base64-encoded kubeconfig files)
+
+     ${BLUE}For SSH/Server deployments:${NC}
+       DEV_SSH_PRIVATE_KEY, DEV_SSH_USER
+       STAGING_SSH_PRIVATE_KEY, STAGING_SSH_USER
+       PROD_SSH_PRIVATE_KEY, PROD_SSH_USER
+
+     ${BLUE}For database migrations:${NC}
+       DEV_DATABASE_URL, DEV_DATABASE_USER, DEV_DATABASE_PASSWORD
+       (repeat for STAGING_ and PROD_)
+
+  ${GREEN}3. Start developing${NC}
      git checkout develop
      git checkout -b feature/my-service/add-feature
+
+${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
+${BLUE}For detailed instructions with examples, see:${NC}
+  ${GREEN}SETUP_GUIDE.md${NC}
 "

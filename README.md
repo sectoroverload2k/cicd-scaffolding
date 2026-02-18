@@ -390,6 +390,8 @@ main (production)
 ./scripts/setup-repo.sh --setup-envs
 ```
 
+After running the script, follow the **[Setup Guide](SETUP_GUIDE.md)** to configure GitHub Environments and Secrets.
+
 ### Prerequisites
 
 - Docker
