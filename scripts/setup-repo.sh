@@ -267,8 +267,8 @@ ${BLUE}Next steps:${NC}
        • production   (add yourself as required reviewer)
 
   ${GREEN}2. Add Secrets${NC}
-     Go to: ${YELLOW}GitHub repo → Settings → Secrets and variables → Actions${NC}
-     Add secrets based on your deployment type:
+     Go to: ${YELLOW}GitHub repo → Settings → Environments → (select environment)${NC}
+     Scroll to \"Environment secrets\" and add secrets based on your deployment type:
 
      ${BLUE}For Kubernetes:${NC}
        DEV_KUBECONFIG, STAGING_KUBECONFIG, PROD_KUBECONFIG

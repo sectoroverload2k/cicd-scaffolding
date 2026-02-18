@@ -36,16 +36,16 @@ Secrets store sensitive values like passwords and API keys. The pipeline needs d
 
 ### How to add secrets:
 
-1. Go to **Settings** → **Secrets and variables** → **Actions**
-2. Click **New repository secret**
-3. Enter the name and value
-4. Click **Add secret**
+1. Go to your repository on GitHub
+2. Click **Settings** (tab at the top)
+3. In the left sidebar, click **Environments**
+4. Click on the environment you want to add secrets to (e.g., `development`)
+5. Scroll down to **Environment secrets**
+6. Click **Add environment secret**
+7. Enter the name and value
+8. Click **Add secret**
 
-### For environment-specific secrets:
-
-1. Go to **Settings** → **Environments**
-2. Click on the environment (e.g., `development`)
-3. Under **Environment secrets**, click **Add secret**
+Repeat for each environment (`development`, `staging`, `production`).
 
 ---
 
