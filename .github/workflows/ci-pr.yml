@@ -8,6 +8,10 @@ concurrency:
   group: ci-${{ github.head_ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   detect-changes:
     runs-on: ubuntu-latest
@@ -67,8 +71,10 @@ jobs:
     with:
       service: ${{ matrix.service }}
       service-path: ${{ matrix.path }}
+      build-type: ${{ matrix.build_type }}
+      build-output: ${{ matrix.build_output || '' }}
       version-suffix: ${{ needs.determine-version-suffix.outputs.suffix }}
-      push: true
+      push: ${{ matrix.deploy_type == 'kubernetes' }}
     secrets: inherit
 
   validate-platform:

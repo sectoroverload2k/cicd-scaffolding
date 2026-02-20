@@ -12,8 +12,10 @@ k8s-project-starter/
 │   │   ├── cd-develop.yml         # Auto-deploy to dev
 │   │   ├── cd-staging.yml         # Auto-deploy to staging
 │   │   ├── cd-production.yml      # Deploy to prod (manual approval)
-│   │   ├── _build-service.yml     # Reusable: build & push images
-│   │   └── _deploy-service.yml    # Reusable: kustomize + kubectl
+│   │   ├── _build-service.yml     # Reusable: build services
+│   │   ├── _deploy-service.yml    # Reusable: Kubernetes deploy
+│   │   ├── _deploy-server.yml     # Reusable: SSH/rsync deploy
+│   │   └── _deploy-migrations.yml # Reusable: Flyway migrations
 │   └── actions/
 │       └── detect-changes/        # Path-based change detection
 │
@@ -36,11 +38,10 @@ k8s-project-starter/
 │           └── overlays/{dev,staging,prod}/
 │
 ├── infra/                         # Infrastructure components
-│   ├── mysql/
-│   │   ├── migrations/            # Flyway SQL migrations
-│   │   └── k8s/
-│   ├── redis/
-│   └── shared/                    # Namespaces, network policies
+│   ├── <component>/               # e.g., email, redis
+│   │   ├── deploy.yaml            # Deployment configuration
+│   │   └── k8s/                   # Kubernetes manifests
+│   └── shared/                    # Shared resources, network policies
 │
 ├── contracts/                     # API & event contracts
 │   ├── api/                       # OpenAPI specifications
@@ -294,42 +295,102 @@ This pipeline supports hybrid architectures with multiple deployment types:
 
 ### Configuring Deployment Type
 
-Each component can specify its deployment type in `deploy.yaml`:
+Each component specifies its deployment configuration in `deploy.yaml`:
 
 ```yaml
-# apps/dashboard/deploy.yaml - PHP app on Apache servers
-type: server
-method: rsync
+# services/api/deploy.yaml - Kubernetes deployment
+build:
+  type: docker
 
 targets:
   dev:
+    type: kubernetes
+    runner: self-hosted        # Use self-hosted runner (optional)
+    namespace: develop         # Target namespace (must match kustomization.yaml)
+  staging:
+    type: kubernetes
+    runner: self-hosted
+    namespace: staging
+  prod:
+    type: kubernetes
+    runner: self-hosted
+    namespace: prod
+```
+
+```yaml
+# apps/dashboard/deploy.yaml - PHP app on Apache servers
+build:
+  type: none  # Or: npm, yarn, hugo, zip
+
+targets:
+  dev:
+    type: server
+    method: rsync
     hosts:
       - web1.dev.example.com
     path: /var/www/dashboard
+    owner: www-data:www-data
+    keep_releases: 5
+    shared_dirs:
+      - storage
+      - uploads
+    post_deploy:
+      - php artisan cache:clear
   staging:
+    type: server
     hosts:
       - web1.staging.example.com
       - web2.staging.example.com
     path: /var/www/dashboard
   prod:
+    type: server
     hosts:
       - web1.example.com
       - web2.example.com
-      - web3.example.com
     path: /var/www/dashboard
 ```
 
 ```yaml
-# services/api/deploy.yaml - Kubernetes deployment
-type: kubernetes
+# infra/database/deploy.yaml - Managed database migrations only
+build:
+  type: none
+
+targets:
+  dev:
+    type: migration
+  staging:
+    type: migration
+  prod:
+    type: migration
 ```
 
+### Build Types
+
+| Build Type | Description | Output |
+|------------|-------------|--------|
+| `docker` | Build Docker image and push to registry | Container image |
+| `npm` | Run `npm ci && npm run build` | `dist/` directory |
+| `yarn` | Run `yarn install && yarn build` | `dist/` directory |
+| `hugo` | Build Hugo static site | `public/` directory |
+| `zip` | Create zip archive of source | `.zip` file |
+| `none` | No build step needed | Source files |
+
+### Namespace Configuration
+
+For Kubernetes deployments, the namespace is extracted from your `kustomization.yaml`:
+
 ```yaml
-# infra/mysql/deploy.yaml - RDS migrations only
-type: migration
-engine: flyway
-path: migrations
+# services/api/k8s/overlays/dev/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: develop  # This namespace is used for deployment
+
+resources:
+  - ../../base
 ```
+
+The pipeline reads the namespace from `kustomization.yaml` rather than assuming it matches the environment name. This allows you to use custom namespaces per environment.
 
 ### Hybrid Architecture Example
 
@@ -356,40 +417,14 @@ See [`deploy/deploy.schema.yaml`](deploy/deploy.schema.yaml) for full configurat
 
 ## Getting Started
 
-### Creating Your Project
+### After Forking
 
-> **Warning**: Do NOT use GitHub's "Fork" button. Forks maintain a link to this repository, and PRs will accidentally target the original repo instead of your own.
-
-**Option 1: Use as Template (Recommended)**
-
-1. Click the green **"Use this template"** button at the top of this repo
-2. Select **"Create a new repository"**
-3. Choose your organization/account and name your project
-4. Clone your new repo and run the setup script
-
-**Option 2: Manual Clone**
+When you fork this repository, GitHub gives you the option to fork only the `main` branch. If you chose that option (or want to ensure all required branches exist), run the setup script:
 
 ```bash
-# Clone the starter
-git clone https://github.com/ORIGINAL/k8s-project-starter.git my-project
-cd my-project
-
-# Remove the link to the original repo
-git remote remove origin
-
-# Create a new repo on GitHub, then:
-git remote add origin git@github.com:YOUR_ORG/my-project.git
-git push -u origin main
-```
-
-### After Creating Your Project
-
-Once you have your own independent copy, run the setup script to create the required branches:
-
-```bash
-# Clone your new repo
-git clone https://github.com/YOUR_ORG/my-project.git
-cd my-project
+# Clone your fork
+git clone https://github.com/YOUR_USERNAME/k8s-project-starter.git
+cd k8s-project-starter
 
 # Run the setup script to create required branches
 ./scripts/setup-repo.sh
@@ -493,13 +528,16 @@ PROD_DATABASE_PASSWORD
 
 ## Database Migrations
 
-Using Flyway Community Edition for forward migrations.
+Using Flyway Community Edition for forward migrations against managed databases (RDS, Cloud SQL, etc.).
 
 ### Creating Migrations
 
 ```bash
+# Create migrations directory for your service
+mkdir -p services/my-service/migrations
+
 # Add migration file
-touch infra/mysql/migrations/V002__add_orders_table.sql
+touch services/my-service/migrations/V001__initial_schema.sql
 ```
 
 Naming: `V{NNN}__{description}.sql`
@@ -509,10 +547,14 @@ Naming: `V{NNN}__{description}.sql`
 
 ### Execution
 
-Migrations run automatically during deployment:
-1. SQL files packaged into ConfigMap
-2. Flyway Job executes
-3. Application deploys after Job completes
+Migrations run automatically via the `_deploy-migrations.yml` workflow:
+1. Flyway runs in a Docker container
+2. Connects directly to your managed database via JDBC
+3. Applies pending migrations before application deployment
+
+### Configuration
+
+Set `type: migration` in your `deploy.yaml` and configure database secrets per environment.
 
 ## Scripts
 

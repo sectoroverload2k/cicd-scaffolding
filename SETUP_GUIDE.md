@@ -1,7 +1,5 @@
 # Setup Guide
 
-> **Important**: Make sure you used "Use this template" or manually cloned the repo (see README). Do NOT use GitHub's "Fork" button—forks maintain a link to the original repo and your PRs will accidentally be sent there.
-
 After running `./scripts/setup-repo.sh`, follow these steps to complete your repository setup.
 
 ---
@@ -155,7 +153,38 @@ openssl rand -base64 32
 
 ---
 
-## Step 4: Start Developing
+## Step 4: Configure Runners (Optional)
+
+By default, workflows use GitHub-hosted runners (`ubuntu-latest`). For Kubernetes deployments that need cluster access, you may need self-hosted runners.
+
+### Using Self-Hosted Runners
+
+1. Set up a self-hosted runner with access to your Kubernetes cluster
+2. Configure your `deploy.yaml` to use the self-hosted runner:
+
+```yaml
+# services/my-service/deploy.yaml
+build:
+  type: docker
+
+targets:
+  dev:
+    type: kubernetes
+    runner: self-hosted    # Use your self-hosted runner
+    namespace: my-namespace
+```
+
+### Runner Options
+
+| Value | Description |
+|-------|-------------|
+| `ubuntu-latest` | GitHub-hosted runner (default) |
+| `self-hosted` | Your self-hosted runner |
+| `[self-hosted, linux]` | Self-hosted with labels (JSON array) |
+
+---
+
+## Step 5: Start Developing
 
 Now you're ready to create your first feature:
 
@@ -191,7 +220,8 @@ Then go to GitHub and create a Pull Request targeting `develop`.
 
 - [ ] All environments created
 - [ ] Production has required reviewers enabled
-- [ ] Kubeconfig secrets (if using Kubernetes)
+- [ ] Kubeconfig secrets (if using Kubernetes with GitHub-hosted runners)
+- [ ] Self-hosted runners configured (if using Kubernetes with cluster access)
 - [ ] SSH secrets (if using server deployments)
 - [ ] Database secrets (if using managed databases)
 - [ ] Application secrets (JWT, passwords, etc.)
@@ -221,6 +251,20 @@ cat ~/.kube/config | base64       # macOS
 - Check that you're pushing to the correct branch (`develop`, `staging`, or `main`)
 - Check Settings → Actions to ensure Actions are enabled
 - Check the Actions tab for any failed runs with error details
+
+### "namespaces not found" error
+
+The namespace in your `kustomization.yaml` doesn't exist in the cluster. Either:
+1. Create the namespace in your cluster: `kubectl create namespace my-namespace`
+2. Or update your `kustomization.yaml` to use an existing namespace
+
+The pipeline reads namespace from `kustomization.yaml`, not from the environment name.
+
+### Self-hosted runner not picking up jobs
+
+- Verify the runner is online in Settings → Actions → Runners
+- Check that your `deploy.yaml` specifies `runner: self-hosted`
+- Ensure the runner has the required tools installed (kubectl, kustomize, docker)
 
 ---
 

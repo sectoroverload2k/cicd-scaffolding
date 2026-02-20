@@ -34,6 +34,7 @@ runs:
       id: changes
       uses: dorny/paths-filter@v3
       with:
+        token: ${{ github.token }}
         filters: |
           # Apps
           dashboard:

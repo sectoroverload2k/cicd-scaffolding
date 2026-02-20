@@ -8,11 +8,19 @@ concurrency:
   group: cd-production
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  pull-requests: read
+  packages: write
+
 jobs:
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
+      kubernetes_matrix: ${{ steps.detect.outputs.kubernetes_matrix }}
+      server_matrix: ${{ steps.detect.outputs.server_matrix }}
+      migrations_matrix: ${{ steps.detect.outputs.migrations_matrix }}
       has_changes: ${{ steps.detect.outputs.has_changes }}
       changed_services: ${{ steps.detect.outputs.changed_services }}
       has_kubernetes: ${{ steps.detect.outputs.has_kubernetes }}
@@ -48,6 +56,8 @@ jobs:
     with:
       service: ${{ matrix.service }}
       service-path: ${{ matrix.path }}
+      build-type: ${{ matrix.build_type }}
+      build-output: ${{ matrix.build_output || '' }}
       version-suffix: ''  # Production: no suffix
       push: ${{ matrix.deploy_type == 'kubernetes' }}
     secrets: inherit
@@ -60,7 +70,7 @@ jobs:
       fail-fast: false
       max-parallel: 1  # Deploy one at a time in production
       matrix:
-        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
+        include: ${{ fromJson(needs.detect-changes.outputs.kubernetes_matrix).include }}
     uses: ./.github/workflows/_deploy-service.yml
     with:
       service: ${{ matrix.service }}
@@ -68,6 +78,7 @@ jobs:
       environment: prod
       image-tag: ${{ needs.build.outputs.version }}
       run-migrations: ${{ matrix.type == 'service' }}
+      runner: ${{ toJson(matrix.runner) }}
     secrets:
       KUBECONFIG: ${{ secrets.PROD_KUBECONFIG }}
       MYSQL_PASSWORD: ${{ secrets.PROD_MYSQL_PASSWORD }}
@@ -81,7 +92,7 @@ jobs:
       fail-fast: false
       max-parallel: 1  # Deploy one at a time in production
       matrix:
-        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
+        include: ${{ fromJson(needs.detect-changes.outputs.server_matrix).include }}
     uses: ./.github/workflows/_deploy-server.yml
     with:
       service: ${{ matrix.service }}
@@ -91,6 +102,7 @@ jobs:
       hosts: ${{ toJson(matrix.hosts) }}
       deploy-path: ${{ matrix.deploy_path }}
       method: ${{ matrix.method }}
+      runner: ${{ toJson(matrix.runner) }}
     secrets:
       SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
       SSH_USER: ${{ secrets.PROD_SSH_USER }}
@@ -102,7 +114,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
+        include: ${{ fromJson(needs.detect-changes.outputs.migrations_matrix).include }}
     uses: ./.github/workflows/_deploy-migrations.yml
     with:
       environment: prod

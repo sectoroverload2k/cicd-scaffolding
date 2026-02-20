@@ -29,6 +29,11 @@ on:
         type: boolean
         default: false
         description: 'Run database migrations before deploy'
+      runner:
+        required: false
+        type: string
+        default: '"ubuntu-latest"'
+        description: 'GitHub Actions runner (JSON string or array)'
     secrets:
       KUBECONFIG:
         required: true
@@ -42,7 +47,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJson(inputs.runner) }}
     environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment == 'staging' && 'staging' || 'development' }}
 
     steps:
@@ -70,10 +75,29 @@ jobs:
           kubectl cluster-info
           kubectl get namespaces
 
+      - name: Extract namespace
+        id: namespace
+        run: |
+          OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+
+          # Extract namespace from kustomization.yaml (fallback to environment name)
+          if [[ -f "$OVERLAY_PATH/kustomization.yaml" ]]; then
+            NAMESPACE=$(grep -E "^namespace:" "$OVERLAY_PATH/kustomization.yaml" | awk '{print $2}' | tr -d '"'"'" || echo "${{ inputs.environment }}")
+            if [[ -z "$NAMESPACE" ]]; then
+              NAMESPACE="${{ inputs.environment }}"
+            fi
+          else
+            NAMESPACE="${{ inputs.environment }}"
+          fi
+          echo "namespace=$NAMESPACE" >> $GITHUB_OUTPUT
+          echo "Using namespace: $NAMESPACE"
+
       - name: Run database migrations
         if: inputs.run-migrations
         run: |
           echo "### Running Migrations" >> $GITHUB_STEP_SUMMARY
+
+          NAMESPACE="${{ steps.namespace.outputs.namespace }}"
 
           # Check if migrations exist for this service
           MIGRATION_PATH="infra/mysql/migrations"
@@ -81,16 +105,16 @@ jobs:
             # Create ConfigMap from SQL files
             kubectl create configmap flyway-migrations \
               --from-file="$MIGRATION_PATH" \
-              --namespace=${{ inputs.environment }} \
+              --namespace=$NAMESPACE \
               --dry-run=client -o yaml | kubectl apply -f -
 
             # Apply migration job
-            kubectl apply -f infra/mysql/k8s/overlays/${{ inputs.environment }}/
+            kubectl apply -k infra/mysql/k8s/overlays/${{ inputs.environment }}/
 
             # Wait for migration to complete
             kubectl wait --for=condition=complete \
               job/flyway-migrate \
-              --namespace=${{ inputs.environment }} \
+              --namespace=$NAMESPACE \
               --timeout=300s
 
             echo "- Migrations completed successfully" >> $GITHUB_STEP_SUMMARY
@@ -123,8 +147,14 @@ jobs:
 
           cd "$OVERLAY_PATH"
 
+          # Extract service type from path (e.g., services/emailer -> services)
+          SERVICE_TYPE=$(echo "${{ inputs.service-path }}" | cut -d'/' -f1)
+
+          # Container registries require lowercase names
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
           # Update the image reference
-          IMAGE="${{ inputs.registry }}/${{ github.repository }}/${{ inputs.service }}"
+          IMAGE="${{ inputs.registry }}/${OWNER}/${SERVICE_TYPE}/${{ inputs.service }}"
           kustomize edit set image "${{ inputs.service }}=${IMAGE}:${{ inputs.image-tag }}"
 
           echo "Updated image to: ${IMAGE}:${{ inputs.image-tag }}"
@@ -133,11 +163,16 @@ jobs:
         id: kustomize
         run: |
           OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+          NAMESPACE="${{ steps.namespace.outputs.namespace }}"
+
+          # Pass namespace to later steps
+          echo "namespace=$NAMESPACE" >> $GITHUB_OUTPUT
 
           # Build the manifests
           kustomize build "$OVERLAY_PATH" > /tmp/manifests.yaml
 
           echo "### Generated Manifests" >> $GITHUB_STEP_SUMMARY
+          echo "- Namespace: $NAMESPACE" >> $GITHUB_STEP_SUMMARY
           echo '```yaml' >> $GITHUB_STEP_SUMMARY
           head -100 /tmp/manifests.yaml >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -153,12 +188,12 @@ jobs:
 
       - name: Wait for rollout
         run: |
-          NAMESPACE="${{ inputs.environment }}"
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
 
           # Get the deployment name (usually matches service name)
           DEPLOYMENT="${{ inputs.service }}"
 
-          echo "Waiting for deployment $DEPLOYMENT to roll out..."
+          echo "Waiting for deployment $DEPLOYMENT in namespace $NAMESPACE to roll out..."
 
           kubectl rollout status deployment/$DEPLOYMENT \
             --namespace=$NAMESPACE \
@@ -169,7 +204,7 @@ jobs:
 
       - name: Verify deployment
         run: |
-          NAMESPACE="${{ inputs.environment }}"
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
           DEPLOYMENT="${{ inputs.service }}"
 
           # Get pod status
@@ -190,7 +225,7 @@ jobs:
           echo "### Deployment Failed" >> $GITHUB_STEP_SUMMARY
           echo "Rolling back..." >> $GITHUB_STEP_SUMMARY
 
-          NAMESPACE="${{ inputs.environment }}"
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
           DEPLOYMENT="${{ inputs.service }}"
 
           # Attempt rollback

@@ -8,11 +8,19 @@ concurrency:
   group: cd-develop
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  pull-requests: read
+  packages: write
+
 jobs:
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
+      kubernetes_matrix: ${{ steps.detect.outputs.kubernetes_matrix }}
+      server_matrix: ${{ steps.detect.outputs.server_matrix }}
+      migrations_matrix: ${{ steps.detect.outputs.migrations_matrix }}
       has_changes: ${{ steps.detect.outputs.has_changes }}
       changed_services: ${{ steps.detect.outputs.changed_services }}
       has_kubernetes: ${{ steps.detect.outputs.has_kubernetes }}
@@ -38,18 +46,19 @@ jobs:
         with:
           environment: dev
 
-  # Build all changed services that need container images
+  # Build all changed services
   build:
     needs: detect-changes
     if: needs.detect-changes.outputs.has_changes == 'true'
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-    # Only build if it's kubernetes or has a Dockerfile
     uses: ./.github/workflows/_build-service.yml
     with:
       service: ${{ matrix.service }}
       service-path: ${{ matrix.path }}
+      build-type: ${{ matrix.build_type }}
+      build-output: ${{ matrix.build_output || '' }}
       version-suffix: beta.${{ github.run_number }}
       push: ${{ matrix.deploy_type == 'kubernetes' }}
     secrets: inherit
@@ -62,8 +71,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
-    # Filter to only kubernetes deployments
+        include: ${{ fromJson(needs.detect-changes.outputs.kubernetes_matrix).include }}
     uses: ./.github/workflows/_deploy-service.yml
     with:
       service: ${{ matrix.service }}
@@ -71,6 +79,7 @@ jobs:
       environment: dev
       image-tag: ${{ needs.build.outputs.version }}
       run-migrations: ${{ matrix.type == 'service' }}
+      runner: ${{ toJson(matrix.runner) }}
     secrets:
       KUBECONFIG: ${{ secrets.DEV_KUBECONFIG }}
       MYSQL_PASSWORD: ${{ secrets.DEV_MYSQL_PASSWORD }}
@@ -83,7 +92,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
+        include: ${{ fromJson(needs.detect-changes.outputs.server_matrix).include }}
     uses: ./.github/workflows/_deploy-server.yml
     with:
       service: ${{ matrix.service }}
@@ -93,6 +102,7 @@ jobs:
       hosts: ${{ toJson(matrix.hosts) }}
       deploy-path: ${{ matrix.deploy_path }}
       method: ${{ matrix.method }}
+      runner: ${{ toJson(matrix.runner) }}
     secrets:
       SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
       SSH_USER: ${{ secrets.DEV_SSH_USER }}
@@ -104,7 +114,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.detect-changes.outputs.matrix).include }}
+        include: ${{ fromJson(needs.detect-changes.outputs.migrations_matrix).include }}
     uses: ./.github/workflows/_deploy-migrations.yml
     with:
       environment: dev
