@@ -1,11 +1,11 @@
-# K8s Monorepo Starter
+# CI/CD Scaffolding
 
 A Kubernetes monorepo with GitHub Actions CI/CD, supporting multiple services with semantic versioning and environment-based deployments.
 
 ## Repository Structure
 
 ```
-k8s-project-starter/
+cicd-scaffolding/
 ├── .github/
 │   ├── workflows/
 │   │   ├── ci-pr.yml               # Build on PR (all branches)
@@ -498,8 +498,8 @@ When you fork this repository, GitHub gives you the option to fork only the `mai
 
 ```bash
 # Clone your fork
-git clone https://github.com/YOUR_USERNAME/k8s-project-starter.git
-cd k8s-project-starter
+git clone https://github.com/YOUR_USERNAME/cicd-scaffolding.git
+cd cicd-scaffolding
 
 # Run the setup script to create required branches
 ./scripts/setup-repo.sh

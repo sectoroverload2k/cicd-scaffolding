@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Setup script for k8s-project-starter
+# Setup script for cicd-scaffolding
 # Run this after forking the repository to create the required branches
 # for the CI/CD pipeline to function properly.
 #
@@ -30,7 +30,7 @@ usage() {
     cat << EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Setup script for k8s-project-starter. Creates the required branches
+Setup script for cicd-scaffolding. Creates the required branches
 (develop, staging) for the CI/CD pipeline after forking the repository.
 
 Options:
@@ -95,7 +95,7 @@ fi
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-info "Setting up k8s-project-starter repository..."
+info "Setting up cicd-scaffolding repository..."
 echo ""
 
 # Check if remote exists

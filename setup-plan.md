@@ -36,7 +36,7 @@ A GitHub Actions CI/CD pipeline for a Kubernetes monorepo supporting multiple se
 ## Repository Structure
 
 ```
-k8s-project-starter/
+cicd-scaffolding/
 ├── .github/
 │   ├── workflows/
 │   │   ├── _build-service.yml          # Reusable: build & push images
