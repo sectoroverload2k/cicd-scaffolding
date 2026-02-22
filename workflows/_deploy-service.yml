@@ -1,0 +1,368 @@
+name: Deploy Service
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+        description: 'Service name'
+      service-path:
+        required: true
+        type: string
+        description: 'Path to service (e.g., apps/dashboard, services/api)'
+      environment:
+        required: true
+        type: string
+        description: 'Target environment (dev, staging, prod)'
+      image-tag:
+        required: false
+        type: string
+        default: ''
+        description: 'Image tag to deploy (ignored if keep-existing-image is true)'
+      keep-existing-image:
+        required: false
+        type: boolean
+        default: false
+        description: 'Keep the currently running image instead of updating it'
+      registry:
+        required: false
+        type: string
+        default: 'ghcr.io'
+        description: 'Container registry'
+      run-mysql-migrations:
+        required: false
+        type: boolean
+        default: false
+        description: 'Run MySQL/Flyway database migrations before deploy'
+      run-pg-migrations:
+        required: false
+        type: boolean
+        default: false
+        description: 'Run PostgreSQL migrations before deploy (service-level)'
+      runner:
+        required: false
+        type: string
+        default: '"ubuntu-latest"'
+        description: 'GitHub Actions runner (JSON string or array)'
+    secrets:
+      KUBECONFIG:
+        required: true
+        description: 'Base64 encoded kubeconfig'
+      MYSQL_PASSWORD:
+        required: false
+        description: 'MySQL password for secret substitution'
+      JWT_SECRET:
+        required: false
+        description: 'JWT secret for secret substitution'
+
+jobs:
+  deploy:
+    runs-on: ${{ fromJson(inputs.runner) }}
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment == 'staging' && 'staging' || 'development' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: '5.3.0'
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify cluster connection
+        run: |
+          kubectl cluster-info
+          kubectl get namespaces
+
+      - name: Extract namespace
+        id: namespace
+        run: |
+          OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+
+          # Extract namespace from kustomization.yaml (fallback to environment name)
+          if [[ -f "$OVERLAY_PATH/kustomization.yaml" ]]; then
+            NAMESPACE=$(grep -E "^namespace:" "$OVERLAY_PATH/kustomization.yaml" | awk '{print $2}' | tr -d '"'"'" || echo "${{ inputs.environment }}")
+            if [[ -z "$NAMESPACE" ]]; then
+              NAMESPACE="${{ inputs.environment }}"
+            fi
+          else
+            NAMESPACE="${{ inputs.environment }}"
+          fi
+          echo "namespace=$NAMESPACE" >> $GITHUB_OUTPUT
+          echo "Using namespace: $NAMESPACE"
+
+      - name: Determine image tag
+        id: image-tag
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          SERVICE_TYPE=$(echo "$SERVICE_PATH" | cut -d'/' -f1)
+
+          # Skip for infra components (they use standard images, not custom builds)
+          if [[ "$SERVICE_TYPE" == "infra" ]]; then
+            echo "tag=standard" >> $GITHUB_OUTPUT
+            echo "Infra component - using standard image from manifests" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          if [[ "${{ inputs.keep-existing-image }}" == "true" ]]; then
+            # Get the current image from the running workload (Deployment or StatefulSet)
+            NAMESPACE="${{ steps.namespace.outputs.namespace }}"
+            RESOURCE="${{ inputs.service }}"
+
+            # Try Deployment first, then StatefulSet
+            CURRENT_IMAGE=$(kubectl get deployment "$RESOURCE" -n "$NAMESPACE" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || \
+              kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+
+            if [[ -z "$CURRENT_IMAGE" ]]; then
+              echo "::error::No existing Deployment or StatefulSet found for ${RESOURCE} in namespace ${NAMESPACE}. Cannot use keep-existing-image for initial deployments."
+              exit 1
+            fi
+
+            # Extract just the tag from the full image reference
+            IMAGE_TAG="${CURRENT_IMAGE##*:}"
+            echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+            echo "Keeping existing image tag: ${IMAGE_TAG}" >> $GITHUB_STEP_SUMMARY
+          else
+            # Read version from VERSION file or package.json
+            if [[ -f "${SERVICE_PATH}/VERSION" ]]; then
+              BASE_VERSION=$(cat "${SERVICE_PATH}/VERSION" | tr -d '[:space:]')
+            elif [[ -f "${SERVICE_PATH}/package.json" ]]; then
+              BASE_VERSION=$(jq -r '.version' "${SERVICE_PATH}/package.json")
+            else
+              BASE_VERSION="1.0.0"
+            fi
+
+            # Apply the same version suffix as the build (beta.N, rc.N, etc.)
+            # Extract suffix from the provided image-tag input
+            if [[ "${{ inputs.image-tag }}" =~ -(.+)$ ]]; then
+              VERSION_SUFFIX="${BASH_REMATCH[1]}"
+              IMAGE_TAG="${BASE_VERSION}-${VERSION_SUFFIX}"
+            else
+              IMAGE_TAG="${BASE_VERSION}"
+            fi
+
+            echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+            echo "Deploying image tag: ${IMAGE_TAG}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Substitute secrets in manifests
+        run: |
+          OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+
+          # Check for secret templates
+          if [[ -f "${OVERLAY_PATH}/secret.yaml" ]]; then
+            envsubst < "${OVERLAY_PATH}/secret.yaml" > /tmp/secret.yaml
+            mv /tmp/secret.yaml "${OVERLAY_PATH}/secret.yaml"
+            echo "Substituted secrets in ${OVERLAY_PATH}/secret.yaml"
+          fi
+        env:
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+
+      - name: Update image in Kustomize
+        id: image
+        run: |
+          OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+
+          if [[ ! -d "$OVERLAY_PATH" ]]; then
+            echo "::error::Overlay path not found: $OVERLAY_PATH"
+            exit 1
+          fi
+
+          # Extract service type from path (e.g., services/emailer -> services, infra/mariadb -> infra)
+          SERVICE_TYPE=$(echo "${{ inputs.service-path }}" | cut -d'/' -f1)
+
+          # Skip image update for infra components (they use standard images like mariadb:11)
+          if [[ "$SERVICE_TYPE" == "infra" ]]; then
+            echo "Skipping image update for infra component (uses standard image)"
+            echo "tag=standard" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          cd "$OVERLAY_PATH"
+
+          # Container registries require lowercase names
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
+          # Use the tag determined in the previous step
+          IMAGE_TAG="${{ steps.image-tag.outputs.tag }}"
+
+          # Update the image reference
+          IMAGE="${{ inputs.registry }}/${OWNER}/${SERVICE_TYPE}/${{ inputs.service }}"
+          kustomize edit set image "${{ inputs.service }}=${IMAGE}:${IMAGE_TAG}"
+
+          echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "Updated image to: ${IMAGE}:${IMAGE_TAG}"
+
+      - name: Build manifests
+        id: kustomize
+        run: |
+          OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
+          NAMESPACE="${{ steps.namespace.outputs.namespace }}"
+
+          # Pass namespace to later steps
+          echo "namespace=$NAMESPACE" >> $GITHUB_OUTPUT
+
+          # Build the manifests
+          kustomize build "$OVERLAY_PATH" > /tmp/manifests.yaml
+
+          echo "### Generated Manifests" >> $GITHUB_STEP_SUMMARY
+          echo "- Namespace: $NAMESPACE" >> $GITHUB_STEP_SUMMARY
+          echo '```yaml' >> $GITHUB_STEP_SUMMARY
+          head -100 /tmp/manifests.yaml >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f /tmp/manifests.yaml
+
+          echo "### Applied Manifests" >> $GITHUB_STEP_SUMMARY
+          echo "- Environment: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: ${{ inputs.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Image tag: ${{ steps.image.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ inputs.keep-existing-image }}" == "true" ]]; then
+            echo "- Image source: kept existing (k8s config only change)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Detect resource type
+        id: resource
+        run: |
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
+          RESOURCE="${{ inputs.service }}"
+
+          # Check if it's a StatefulSet
+          if kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
+            echo "type=statefulset" >> $GITHUB_OUTPUT
+            echo "Detected StatefulSet: $RESOURCE"
+          elif kubectl get deployment "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
+            echo "type=deployment" >> $GITHUB_OUTPUT
+            echo "Detected Deployment: $RESOURCE"
+          else
+            echo "::error::Resource $RESOURCE not found as Deployment or StatefulSet"
+            exit 1
+          fi
+
+      - name: Wait for rollout
+        run: |
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
+          RESOURCE="${{ inputs.service }}"
+          TYPE="${{ steps.resource.outputs.type }}"
+
+          echo "Waiting for $TYPE $RESOURCE in namespace $NAMESPACE to roll out..."
+
+          kubectl rollout status "$TYPE/$RESOURCE" \
+            --namespace=$NAMESPACE \
+            --timeout=300s
+
+          echo "### Rollout Complete" >> $GITHUB_STEP_SUMMARY
+          kubectl get "$TYPE" "$RESOURCE" -n "$NAMESPACE" -o wide >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify deployment
+        run: |
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
+          RESOURCE="${{ inputs.service }}"
+          TYPE="${{ steps.resource.outputs.type }}"
+
+          # Get pod status
+          echo "### Pod Status" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n "$NAMESPACE" -l app="$RESOURCE" -o wide >> $GITHUB_STEP_SUMMARY
+
+          # Check for ready pods
+          READY_PODS=$(kubectl get "$TYPE" "$RESOURCE" -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}')
+          DESIRED_PODS=$(kubectl get "$TYPE" "$RESOURCE" -n "$NAMESPACE" -o jsonpath='{.spec.replicas}')
+
+          if [[ "$READY_PODS" != "$DESIRED_PODS" ]]; then
+            echo "::warning::Only $READY_PODS of $DESIRED_PODS pods are ready"
+          fi
+
+      - name: Run database migrations
+        if: inputs.run-mysql-migrations || inputs.run-pg-migrations
+        run: |
+          echo "### Running Database Migrations" >> $GITHUB_STEP_SUMMARY
+
+          SERVICE="${{ inputs.service }}"
+          SERVICE_PATH="${{ inputs.service-path }}"
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
+          MIGRATIONS_PATH="${SERVICE_PATH}/migrations"
+          MIGRATION_TEMPLATE="${SERVICE_PATH}/k8s/base/migration.yaml"
+          OVERLAY_PATH="${SERVICE_PATH}/k8s/overlays/${{ inputs.environment }}"
+
+          # Check for migration template
+          if [[ ! -f "$MIGRATION_TEMPLATE" ]]; then
+            echo "- No migration template found at $MIGRATION_TEMPLATE" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Check for migration files
+          if [[ ! -d "$MIGRATIONS_PATH" ]]; then
+            echo "- No migrations directory found at $MIGRATIONS_PATH" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          MIGRATION_COUNT=$(find "$MIGRATIONS_PATH" -maxdepth 1 -name "*.sql" -type f | wc -l)
+          if [[ "$MIGRATION_COUNT" -eq 0 ]]; then
+            echo "- No migration files found" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "Found $MIGRATION_COUNT migration files"
+
+          # Create ConfigMap from migration files
+          kubectl create configmap "${SERVICE}-migrations" \
+            --from-file="$MIGRATIONS_PATH" \
+            --namespace="$NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Generate unique job name with timestamp
+          JOB_NAME="${SERVICE}-migrate-$(date +%s)"
+
+          # Apply migration template with unique job name
+          sed "s/name: ${SERVICE}-migrate$/name: ${JOB_NAME}/" "$MIGRATION_TEMPLATE" | \
+            kubectl apply -n "$NAMESPACE" -f -
+
+          echo "Waiting for migration job: $JOB_NAME"
+
+          # Wait for completion
+          if kubectl wait --for=condition=complete job/"$JOB_NAME" -n "$NAMESPACE" --timeout=300s 2>/dev/null; then
+            POD_NAME=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}')
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl logs "$POD_NAME" -n "$NAMESPACE" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "- Migrations completed successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            POD_NAME=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}')
+            echo "::error::Migration failed"
+            kubectl logs "$POD_NAME" -n "$NAMESPACE" || true
+            exit 1
+          fi
+
+      - name: Cleanup on failure
+        if: failure()
+        run: |
+          echo "### Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "Rolling back..." >> $GITHUB_STEP_SUMMARY
+
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
+          RESOURCE="${{ inputs.service }}"
+          TYPE="${{ steps.resource.outputs.type }}"
+
+          # Attempt rollback (works for both Deployment and StatefulSet)
+          kubectl rollout undo "$TYPE/$RESOURCE" -n "$NAMESPACE" || true
+
+          # Get logs from failing pods
+          echo "### Pod Logs" >> $GITHUB_STEP_SUMMARY
+          kubectl logs -n "$NAMESPACE" -l app="$RESOURCE" --tail=50 >> $GITHUB_STEP_SUMMARY || true

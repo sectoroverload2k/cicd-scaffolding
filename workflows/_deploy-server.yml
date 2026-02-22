@@ -1,0 +1,542 @@
+name: Deploy to Server
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+        description: 'Service name'
+      service-path:
+        required: true
+        type: string
+        description: 'Path to service (e.g., apps/dashboard)'
+      environment:
+        required: true
+        type: string
+        description: 'Target environment (dev, staging, prod)'
+      version:
+        required: true
+        type: string
+        description: 'Version being deployed'
+      hosts:
+        required: true
+        type: string
+        description: 'JSON array of target hosts'
+      deploy-path:
+        required: true
+        type: string
+        description: 'Base path on target server (e.g., /webroot/myapp)'
+      method:
+        required: false
+        type: string
+        default: 'rsync'
+        description: 'Deployment method: rsync or codedeploy'
+      runner:
+        required: false
+        type: string
+        default: '"ubuntu-latest"'
+        description: 'GitHub Actions runner (JSON string or array)'
+    secrets:
+      SSH_PRIVATE_KEY:
+        required: true
+        description: 'SSH private key for server access'
+      SSH_USER:
+        required: false
+        description: 'SSH username (default: deploy)'
+
+jobs:
+  deploy:
+    runs-on: ${{ fromJson(inputs.runner) }}
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment == 'staging' && 'staging' || 'development' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          HOSTS='${{ inputs.hosts }}'
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          done
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Parse deploy config
+        id: config
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          ENVIRONMENT="${{ inputs.environment }}"
+
+          case "$ENVIRONMENT" in
+            prod) ENV_KEY="prod" ;;
+            staging) ENV_KEY="staging" ;;
+            *) ENV_KEY="dev" ;;
+          esac
+
+          if [[ -f "${SERVICE_PATH}/deploy.yaml" ]]; then
+            python3 << 'PYTHON_SCRIPT'
+          import yaml
+          import json
+          import os
+
+          service_path = os.environ.get('SERVICE_PATH', '')
+          env_key = os.environ.get('ENV_KEY', 'dev')
+
+          try:
+              with open(f'{service_path}/deploy.yaml') as f:
+                  config = yaml.safe_load(f)
+
+              target = config.get('targets', {}).get(env_key, {})
+
+              # Deployment options
+              owner = target.get('owner', 'www-data:www-data')
+              keep_releases = target.get('keep_releases', 5)
+              shared_dirs = target.get('shared_dirs', [])
+              shared_files = target.get('shared_files', [])
+
+              # Config files
+              config_section = target.get('config', config.get('config', {}))
+              config_files = config_section.get('files', []) if isinstance(config_section, dict) else []
+              post_config = config_section.get('post_config', []) if isinstance(config_section, dict) else []
+
+              # Post deploy hooks
+              post_deploy = target.get('post_deploy', [])
+
+              # Ansible config
+              ansible_config = target.get('ansible', {})
+              ansible_playbook = ansible_config.get('playbook', '')
+              ansible_extra_vars = ansible_config.get('extra_vars', {})
+
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f'owner={owner}\n')
+                  f.write(f'keep_releases={keep_releases}\n')
+                  f.write(f'shared_dirs={json.dumps(shared_dirs)}\n')
+                  f.write(f'shared_files={json.dumps(shared_files)}\n')
+                  f.write(f'config_files={json.dumps(config_files)}\n')
+                  f.write(f'post_config={json.dumps(post_config)}\n')
+                  f.write(f'post_deploy={json.dumps(post_deploy)}\n')
+                  f.write(f'has_config={"true" if config_files else "false"}\n')
+                  f.write(f'has_hooks={"true" if post_deploy or post_config else "false"}\n')
+                  f.write(f'ansible_playbook={ansible_playbook}\n')
+                  f.write(f'ansible_extra_vars={json.dumps(ansible_extra_vars)}\n')
+                  f.write(f'has_ansible={"true" if ansible_playbook else "false"}\n')
+
+          except Exception as e:
+              print(f"Warning: {e}")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write('owner=www-data:www-data\n')
+                  f.write('keep_releases=5\n')
+                  f.write('shared_dirs=[]\n')
+                  f.write('shared_files=[]\n')
+                  f.write('config_files=[]\n')
+                  f.write('post_config=[]\n')
+                  f.write('post_deploy=[]\n')
+                  f.write('has_config=false\n')
+                  f.write('has_hooks=false\n')
+                  f.write('ansible_playbook=\n')
+                  f.write('ansible_extra_vars={}\n')
+                  f.write('has_ansible=false\n')
+          PYTHON_SCRIPT
+          else
+            echo "owner=www-data:www-data" >> $GITHUB_OUTPUT
+            echo "keep_releases=5" >> $GITHUB_OUTPUT
+            echo "shared_dirs=[]" >> $GITHUB_OUTPUT
+            echo "shared_files=[]" >> $GITHUB_OUTPUT
+            echo "config_files=[]" >> $GITHUB_OUTPUT
+            echo "post_config=[]" >> $GITHUB_OUTPUT
+            echo "post_deploy=[]" >> $GITHUB_OUTPUT
+            echo "has_config=false" >> $GITHUB_OUTPUT
+            echo "has_hooks=false" >> $GITHUB_OUTPUT
+            echo "ansible_playbook=" >> $GITHUB_OUTPUT
+            echo "ansible_extra_vars={}" >> $GITHUB_OUTPUT
+            echo "has_ansible=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          SERVICE_PATH: ${{ inputs.service-path }}
+          ENV_KEY: ${{ inputs.environment }}
+
+      - name: Generate release name
+        id: release
+        run: |
+          RELEASE_NAME="$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA:0:7}"
+          echo "name=$RELEASE_NAME" >> $GITHUB_OUTPUT
+          echo "Release: $RELEASE_NAME"
+
+      - name: Run pre-build script
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          if [[ -f "${SERVICE_PATH}/scripts/pre-build.sh" ]]; then
+            echo "Running pre-build.sh..."
+            chmod +x "${SERVICE_PATH}/scripts/pre-build.sh"
+            cd "$SERVICE_PATH" && ./scripts/pre-build.sh
+          fi
+        env:
+          VERSION: ${{ inputs.version }}
+          ENVIRONMENT: ${{ inputs.environment }}
+
+      - name: Run build script
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          if [[ -f "${SERVICE_PATH}/scripts/build.sh" ]]; then
+            echo "Running build.sh..."
+            chmod +x "${SERVICE_PATH}/scripts/build.sh"
+            cd "$SERVICE_PATH" && ./scripts/build.sh
+          fi
+        env:
+          VERSION: ${{ inputs.version }}
+          ENVIRONMENT: ${{ inputs.environment }}
+
+      - name: Run post-build script
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          if [[ -f "${SERVICE_PATH}/scripts/post-build.sh" ]]; then
+            echo "Running post-build.sh..."
+            chmod +x "${SERVICE_PATH}/scripts/post-build.sh"
+            cd "$SERVICE_PATH" && ./scripts/post-build.sh
+          fi
+        env:
+          VERSION: ${{ inputs.version }}
+          ENVIRONMENT: ${{ inputs.environment }}
+
+      - name: Create deployment artifact
+        id: artifact
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          ARTIFACT_DIR="/tmp/artifact"
+          ARTIFACT_NAME="${{ inputs.service }}-${{ steps.release.outputs.name }}"
+
+          mkdir -p "$ARTIFACT_DIR"
+
+          # Copy application files (exclude dev/build files)
+          rsync -av --exclude='.git' \
+                    --exclude='node_modules' \
+                    --exclude='vendor' \
+                    --exclude='tests' \
+                    --exclude='*.test.*' \
+                    --exclude='.env*' \
+                    --exclude='docker-compose*' \
+                    --exclude='Dockerfile' \
+                    --exclude='k8s' \
+                    --exclude='deploy.yaml' \
+                    --exclude='scripts' \
+                    --exclude='config' \
+                    "$SERVICE_PATH/" "$ARTIFACT_DIR/"
+
+          # Create version/deployment manifest
+          echo "${{ inputs.version }}" > "$ARTIFACT_DIR/VERSION"
+          cat > "$ARTIFACT_DIR/.deployment.json" << EOF
+          {
+            "service": "${{ inputs.service }}",
+            "version": "${{ inputs.version }}",
+            "release": "${{ steps.release.outputs.name }}",
+            "environment": "${{ inputs.environment }}",
+            "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "deployed_by": "github-actions"
+          }
+          EOF
+
+          # Show what we're packaging
+          echo "### Artifact Contents" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          find "$ARTIFACT_DIR" -type f >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Create tar.gz artifact (more portable than zip)
+          cd "$ARTIFACT_DIR"
+          tar -czvf "/tmp/${ARTIFACT_NAME}.tar.gz" .
+
+          # Verify archive has content
+          echo "Archive contents:"
+          tar -tzvf "/tmp/${ARTIFACT_NAME}.tar.gz"
+
+          echo "artifact_path=/tmp/${ARTIFACT_NAME}.tar.gz" >> $GITHUB_OUTPUT
+          echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          path: ${{ steps.artifact.outputs.artifact_path }}
+          retention-days: 30
+
+      - name: Deploy to servers
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          DEPLOY_PATH="${{ inputs.deploy-path }}"
+          HOSTS='${{ inputs.hosts }}'
+          RELEASE_NAME="${{ steps.release.outputs.name }}"
+          ARTIFACT_PATH="${{ steps.artifact.outputs.artifact_path }}"
+          OWNER="${{ steps.config.outputs.owner }}"
+          KEEP_RELEASES="${{ steps.config.outputs.keep_releases }}"
+          SHARED_DIRS='${{ steps.config.outputs.shared_dirs }}'
+          SHARED_FILES='${{ steps.config.outputs.shared_files }}'
+
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release:** $RELEASE_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "- **Owner:** $OWNER" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            echo "Deploying to $HOST..."
+            echo "#### $HOST" >> $GITHUB_STEP_SUMMARY
+
+            # Create directory structure
+            ssh "$SSH_USER@$HOST" "
+              sudo mkdir -p '$DEPLOY_PATH/releases'
+              sudo mkdir -p '$DEPLOY_PATH/shared'
+              sudo chown -R $SSH_USER:$SSH_USER '$DEPLOY_PATH'
+            "
+
+            # Upload and extract artifact
+            RELEASE_PATH="$DEPLOY_PATH/releases/$RELEASE_NAME"
+            scp "$ARTIFACT_PATH" "$SSH_USER@$HOST:/tmp/release.tar.gz"
+
+            ssh "$SSH_USER@$HOST" "
+              set -e
+              mkdir -p '$RELEASE_PATH'
+              cd '$RELEASE_PATH'
+              tar -xzvf /tmp/release.tar.gz
+              rm /tmp/release.tar.gz
+            "
+
+            # Create shared directories
+            if [[ "$SHARED_DIRS" != "[]" ]]; then
+              echo "$SHARED_DIRS" | jq -r '.[]' | while read DIR; do
+                ssh "$SSH_USER@$HOST" "
+                  mkdir -p '$DEPLOY_PATH/shared/$DIR'
+                  rm -rf '$RELEASE_PATH/$DIR' 2>/dev/null || true
+                  ln -sfn '$DEPLOY_PATH/shared/$DIR' '$RELEASE_PATH/$DIR'
+                "
+              done
+            fi
+
+            # Link shared files
+            if [[ "$SHARED_FILES" != "[]" ]]; then
+              echo "$SHARED_FILES" | jq -r '.[]' | while read FILE; do
+                ssh "$SSH_USER@$HOST" "
+                  mkdir -p '$DEPLOY_PATH/shared/\$(dirname $FILE)'
+                  touch '$DEPLOY_PATH/shared/$FILE' 2>/dev/null || true
+                  rm -f '$RELEASE_PATH/$FILE' 2>/dev/null || true
+                  ln -sfn '$DEPLOY_PATH/shared/$FILE' '$RELEASE_PATH/$FILE'
+                "
+              done
+            fi
+
+            # Set ownership before symlink swap
+            ssh "$SSH_USER@$HOST" "
+              sudo chown -R $OWNER '$RELEASE_PATH'
+              sudo chmod -R 755 '$RELEASE_PATH'
+            "
+
+            # Atomic symlink swap
+            ssh "$SSH_USER@$HOST" "
+              ln -sfn '$RELEASE_PATH' '$DEPLOY_PATH/current.new'
+              mv -Tf '$DEPLOY_PATH/current.new' '$DEPLOY_PATH/current'
+            "
+
+            echo "- Symlink swapped to \`$RELEASE_NAME\`" >> $GITHUB_STEP_SUMMARY
+
+            # Cleanup old releases (sort by name descending since names are YYYYMMDD-HHMMSS format)
+            # Using name sort instead of mtime (-t) because tar extraction can affect directory mtime
+            ssh "$SSH_USER@$HOST" "
+              cd '$DEPLOY_PATH/releases'
+              ls -1 | sort -r | tail -n +$((KEEP_RELEASES + 1)) | xargs -r rm -rf
+            "
+
+            echo "Deployed to $HOST successfully"
+          done
+
+      - name: Deploy config files
+        if: steps.config.outputs.has_config == 'true'
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          SERVICE_PATH="${{ inputs.service-path }}"
+          HOSTS='${{ inputs.hosts }}'
+          CONFIG_FILES='${{ steps.config.outputs.config_files }}'
+
+          echo "### Config Files" >> $GITHUB_STEP_SUMMARY
+
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            echo "$CONFIG_FILES" | jq -c '.[]' | while read -r CONFIG; do
+              SOURCE=$(echo "$CONFIG" | jq -r '.source')
+              DEST=$(echo "$CONFIG" | jq -r '.dest')
+
+              if [[ -f "${SERVICE_PATH}/${SOURCE}" ]]; then
+                scp "${SERVICE_PATH}/${SOURCE}" "$SSH_USER@$HOST:/tmp/config_temp"
+                ssh "$SSH_USER@$HOST" "
+                  sudo mkdir -p \$(dirname '$DEST')
+                  sudo mv /tmp/config_temp '$DEST'
+                  sudo chown root:root '$DEST'
+                  sudo chmod 644 '$DEST'
+                "
+                echo "- \`$SOURCE\` → \`$DEST\`" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          done
+
+      - name: Run post-deploy hooks
+        if: steps.config.outputs.has_hooks == 'true'
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          HOSTS='${{ inputs.hosts }}'
+          DEPLOY_PATH="${{ inputs.deploy-path }}"
+          RELEASE_PATH="$DEPLOY_PATH/releases/${{ steps.release.outputs.name }}"
+          POST_CONFIG='${{ steps.config.outputs.post_config }}'
+          POST_DEPLOY='${{ steps.config.outputs.post_deploy }}'
+
+          echo "### Post-Deploy Hooks" >> $GITHUB_STEP_SUMMARY
+
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            # Run post_config commands
+            if [[ "$POST_CONFIG" != "[]" ]]; then
+              echo "$POST_CONFIG" | jq -r '.[]' | while read -r CMD; do
+                echo "Running: $CMD"
+                ssh "$SSH_USER@$HOST" "$CMD"
+                echo "- \`$CMD\`" >> $GITHUB_STEP_SUMMARY
+              done
+            fi
+
+            # Run post_deploy commands
+            if [[ "$POST_DEPLOY" != "[]" ]]; then
+              echo "$POST_DEPLOY" | jq -r '.[]' | while read -r CMD; do
+                echo "Running: $CMD"
+                ssh "$SSH_USER@$HOST" "cd '$DEPLOY_PATH/current' && $CMD"
+                echo "- \`$CMD\`" >> $GITHUB_STEP_SUMMARY
+              done
+            fi
+          done
+
+      - name: Install Ansible
+        if: steps.config.outputs.has_ansible == 'true'
+        run: |
+          pip install ansible
+
+      - name: Run Ansible playbook
+        if: steps.config.outputs.has_ansible == 'true'
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          HOSTS='${{ inputs.hosts }}'
+          DEPLOY_PATH="${{ inputs.deploy-path }}"
+          RELEASE_NAME="${{ steps.release.outputs.name }}"
+          PLAYBOOK="${{ steps.config.outputs.ansible_playbook }}"
+          EXTRA_VARS='${{ steps.config.outputs.ansible_extra_vars }}'
+          REPO_ROOT="${{ github.workspace }}"
+
+          echo "### Ansible Deployment" >> $GITHUB_STEP_SUMMARY
+
+          # Build host list for ansible
+          HOST_LIST=$(echo "$HOSTS" | jq -r '.[]' | paste -sd,)
+
+          # Build extra vars JSON with repo_root for shared roles
+          # Note: 'environment' and 'roles' are reserved in Ansible, use alternatives
+          ANSIBLE_VARS=$(cat <<EOF
+          {
+            "repo_root": "$REPO_ROOT",
+            "deploy_path": "$DEPLOY_PATH",
+            "release_name": "$RELEASE_NAME",
+            "release_path": "$DEPLOY_PATH/releases/$RELEASE_NAME",
+            "shared_path": "$DEPLOY_PATH/shared",
+            "current_path": "$DEPLOY_PATH/current",
+            "version": "${{ inputs.version }}",
+            "deploy_env": "${{ inputs.environment }}",
+            "service": "${{ inputs.service }}"
+          }
+          EOF
+          )
+
+          # Merge with user-provided extra_vars
+          if [[ "$EXTRA_VARS" != "{}" ]]; then
+            ANSIBLE_VARS=$(echo "$ANSIBLE_VARS" "$EXTRA_VARS" | jq -s 'add')
+          fi
+
+          echo "Running playbook: $PLAYBOOK"
+          echo "Hosts: $HOST_LIST"
+          echo "Variables: $ANSIBLE_VARS"
+
+          # Run ansible-playbook from repo root (playbook path is relative to root)
+          ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
+            -i "$HOST_LIST," \
+            --user "$SSH_USER" \
+            --private-key ~/.ssh/id_rsa \
+            --extra-vars "$ANSIBLE_VARS" \
+            "$PLAYBOOK"
+
+          echo "- Playbook \`$PLAYBOOK\` completed successfully" >> $GITHUB_STEP_SUMMARY
+
+      - name: Run post-deploy script
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          if [[ -f "${SERVICE_PATH}/scripts/post-deploy.sh" ]]; then
+            echo "Running post-deploy.sh..."
+            chmod +x "${SERVICE_PATH}/scripts/post-deploy.sh"
+            cd "$SERVICE_PATH" && ./scripts/post-deploy.sh
+          fi
+        env:
+          VERSION: ${{ inputs.version }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          DEPLOY_PATH: ${{ inputs.deploy-path }}
+          RELEASE_NAME: ${{ steps.release.outputs.name }}
+
+      - name: Verify deployment
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          DEPLOY_PATH="${{ inputs.deploy-path }}"
+          HOSTS='${{ inputs.hosts }}'
+
+          echo "### Verification" >> $GITHUB_STEP_SUMMARY
+
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            VERSION=$(ssh "$SSH_USER@$HOST" "cat '$DEPLOY_PATH/current/VERSION' 2>/dev/null" || echo "unknown")
+            CURRENT=$(ssh "$SSH_USER@$HOST" "readlink '$DEPLOY_PATH/current'" || echo "unknown")
+
+            if [[ "$VERSION" == "${{ inputs.version }}" ]]; then
+              echo "- ✅ $HOST: v$VERSION ($CURRENT)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ❌ $HOST: expected v${{ inputs.version }}, got v$VERSION" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Cleanup SSH
+        if: always()
+        run: rm -f ~/.ssh/id_rsa
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          SSH_USER="${{ secrets.SSH_USER }}"
+          SSH_USER="${SSH_USER:-deploy}"
+          DEPLOY_PATH="${{ inputs.deploy-path }}"
+          HOSTS='${{ inputs.hosts }}'
+
+          echo "### Rollback" >> $GITHUB_STEP_SUMMARY
+
+          echo "$HOSTS" | jq -r '.[]' | while read HOST; do
+            ssh "$SSH_USER@$HOST" "
+              cd '$DEPLOY_PATH/releases'
+              PREV=\$(ls -t | sed -n '2p')
+              if [ -n \"\$PREV\" ]; then
+                ln -sfn '$DEPLOY_PATH/releases/'\"\$PREV\" '$DEPLOY_PATH/current.new'
+                mv -Tf '$DEPLOY_PATH/current.new' '$DEPLOY_PATH/current'
+                echo 'Rolled back to '\"\$PREV\"
+              fi
+            " || true
+            echo "- Rolled back on $HOST" >> $GITHUB_STEP_SUMMARY
+          done

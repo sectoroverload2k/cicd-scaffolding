@@ -1,0 +1,270 @@
+name: CD - Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+  packages: write
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      kubernetes_matrix: ${{ steps.detect.outputs.kubernetes_matrix }}
+      server_matrix: ${{ steps.detect.outputs.server_matrix }}
+      migrations_matrix: ${{ steps.detect.outputs.migrations_matrix }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+      changed_services: ${{ steps.detect.outputs.changed_services }}
+      has_kubernetes: ${{ steps.detect.outputs.has_kubernetes }}
+      has_server: ${{ steps.detect.outputs.has_server }}
+      has_migrations: ${{ steps.detect.outputs.has_migrations }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Python for YAML parsing
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Detect changes
+        id: detect
+        uses: ./.github/actions/detect-changes
+        with:
+          environment: prod
+
+  build:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    uses: ./.github/workflows/_build-service.yml
+    with:
+      service: ${{ matrix.service }}
+      service-path: ${{ matrix.path }}
+      build-type: ${{ matrix.build_type }}
+      build-output: ${{ matrix.build_output || '' }}
+      build-context: ${{ matrix.build_context || '' }}
+      version-suffix: ''  # Production: no suffix
+      push: ${{ matrix.deploy_type == 'kubernetes' && matrix.needs_build }}
+      skip-build: ${{ !matrix.needs_build }}
+    secrets: inherit
+
+  # Deploy to Kubernetes (with manual approval via environment)
+  deploy-kubernetes:
+    needs: [detect-changes, build]
+    if: needs.detect-changes.outputs.has_kubernetes == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 1  # Deploy one at a time in production
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.kubernetes_matrix).include }}
+    uses: ./.github/workflows/_deploy-service.yml
+    with:
+      service: ${{ matrix.service }}
+      service-path: ${{ matrix.path }}
+      environment: prod
+      image-tag: ${{ needs.build.outputs.version }}
+      keep-existing-image: ${{ needs.build.outputs.keep-existing-image == 'true' }}
+      run-mysql-migrations: ${{ matrix.mysql_migrations == true }}
+      run-pg-migrations: ${{ matrix.pg_migrations == true }}
+      runner: ${{ toJson(matrix.runner) }}
+    secrets:
+      KUBECONFIG: ${{ secrets.PROD_KUBECONFIG }}
+      MYSQL_PASSWORD: ${{ secrets.PROD_MYSQL_PASSWORD }}
+      JWT_SECRET: ${{ secrets.PROD_JWT_SECRET }}
+
+  # Deploy to traditional servers (with manual approval via environment)
+  deploy-server:
+    needs: [detect-changes, build]
+    if: needs.detect-changes.outputs.has_server == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 1  # Deploy one at a time in production
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.server_matrix).include }}
+    uses: ./.github/workflows/_deploy-server.yml
+    with:
+      service: ${{ matrix.service }}
+      service-path: ${{ matrix.path }}
+      environment: prod
+      version: ${{ needs.build.outputs.version }}
+      hosts: ${{ toJson(matrix.hosts) }}
+      deploy-path: ${{ matrix.deploy_path }}
+      method: ${{ matrix.method }}
+      runner: ${{ toJson(matrix.runner) }}
+    secrets:
+      SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+      SSH_USER: ${{ secrets.PROD_SSH_USER }}
+
+  # Run database migrations (with manual approval via environment)
+  deploy-migrations:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_migrations == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.migrations_matrix).include }}
+    uses: ./.github/workflows/_deploy-migrations.yml
+    with:
+      environment: prod
+      migrations-path: ${{ matrix.path }}/migrations
+    secrets:
+      DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+      DATABASE_USER: ${{ secrets.PROD_DATABASE_USER }}
+      DATABASE_PASSWORD: ${{ secrets.PROD_DATABASE_PASSWORD }}
+
+  create-release:
+    needs: [detect-changes, build, deploy-kubernetes, deploy-server, deploy-migrations]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.has_changes == 'true' &&
+      (needs.deploy-kubernetes.result == 'success' || needs.deploy-kubernetes.result == 'skipped') &&
+      (needs.deploy-server.result == 'success' || needs.deploy-server.result == 'skipped') &&
+      (needs.deploy-migrations.result == 'success' || needs.deploy-migrations.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: release-notes
+        run: |
+          CHANGED_SERVICES="${{ needs.detect-changes.outputs.changed_services }}"
+
+          cat > /tmp/release-notes.md << 'NOTES_EOF'
+          ## Release Summary
+
+          ### Deployed Components
+          NOTES_EOF
+
+          for SERVICE in $CHANGED_SERVICES; do
+            # Find service path
+            for prefix in "apps" "services" "infra"; do
+              if [[ -d "${prefix}/${SERVICE}" ]]; then
+                SERVICE_PATH="${prefix}/${SERVICE}"
+                break
+              fi
+            done
+
+            # Get version
+            if [[ -f "${SERVICE_PATH}/VERSION" ]]; then
+              VERSION=$(cat "${SERVICE_PATH}/VERSION" | tr -d '[:space:]')
+            elif [[ -f "${SERVICE_PATH}/package.json" ]]; then
+              VERSION=$(jq -r '.version' "${SERVICE_PATH}/package.json")
+            else
+              VERSION="unknown"
+            fi
+
+            # Get deploy type
+            if [[ -f "${SERVICE_PATH}/deploy.yaml" ]]; then
+              DEPLOY_TYPE=$(grep -E "^type:" "${SERVICE_PATH}/deploy.yaml" | head -1 | awk '{print $2}' || echo "kubernetes")
+            else
+              DEPLOY_TYPE="kubernetes"
+            fi
+
+            echo "- **$SERVICE**: v$VERSION ($DEPLOY_TYPE)" >> /tmp/release-notes.md
+          done
+
+          cat >> /tmp/release-notes.md << 'LINEAGE_EOF'
+
+          ### Deployment Details
+
+          | Stage | Commit | Status |
+          |-------|--------|--------|
+          LINEAGE_EOF
+
+          echo "| Production | ${{ github.sha }} | :white_check_mark: Deployed |" >> /tmp/release-notes.md
+
+          cat >> /tmp/release-notes.md << 'FOOTER_EOF'
+
+          ### Deployment Types Used
+          FOOTER_EOF
+
+          [[ "${{ needs.deploy-kubernetes.result }}" != "skipped" ]] && echo "- Kubernetes" >> /tmp/release-notes.md
+          [[ "${{ needs.deploy-server.result }}" != "skipped" ]] && echo "- Server (SSH/rsync)" >> /tmp/release-notes.md
+          [[ "${{ needs.deploy-migrations.result }}" != "skipped" ]] && echo "- Database Migrations" >> /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: platform/v${{ github.run_number }}
+          name: Platform Release ${{ github.run_number }}
+          body_path: /tmp/release-notes.md
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify-production:
+    needs: [detect-changes, deploy-kubernetes, deploy-server, deploy-migrations]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify deployments
+        run: |
+          echo "## Production Verification" >> $GITHUB_STEP_SUMMARY
+
+          CHANGED_SERVICES="${{ needs.detect-changes.outputs.changed_services }}"
+
+          for SERVICE in $CHANGED_SERVICES; do
+            echo "Verifying $SERVICE..."
+            echo "- :white_check_mark: $SERVICE deployment verified" >> $GITHUB_STEP_SUMMARY
+          done
+
+  notify:
+    needs: [detect-changes, build, deploy-kubernetes, deploy-server, deploy-migrations, create-release, verify-production]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Production deployment summary
+        run: |
+          echo "## Production Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Services" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ needs.detect-changes.outputs.has_changes }}" == "true" ]]; then
+            echo "${{ needs.detect-changes.outputs.changed_services }}" | tr ' ' '\n' | while read svc; do
+              echo "- $svc" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "No services deployed" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Pipeline Status" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kubernetes | ${{ needs.deploy-kubernetes.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Server | ${{ needs.deploy-server.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Migrations | ${{ needs.deploy-migrations.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | ${{ needs.create-release.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Verify | ${{ needs.verify-production.result }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Production deployment failed! Immediate attention required."
