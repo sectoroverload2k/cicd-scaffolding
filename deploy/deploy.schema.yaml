@@ -6,14 +6,35 @@
 # TYPE: kubernetes
 # For services deployed to Kubernetes clusters
 # =============================================================================
-# type: kubernetes
+# build:
+#   type: docker                  # docker | npm | yarn | hugo | zip | none
+#   context: .                    # Build context (use "." for repo root with shared packages)
+#
+# # PostgreSQL migrations (service-level)
+# database:
+#   type: postgresql
+#   migrations: true              # Enable PostgreSQL migrations from {service}/migrations/
+#
+# targets:
+#   dev:
+#     type: kubernetes
+#     runner: ubuntu-latest       # GitHub Actions runner (string or array)
+#     namespace: develop          # Target namespace (must match kustomization.yaml)
+#   staging:
+#     type: kubernetes
+#     runner: self-hosted
+#     namespace: staging
+#   prod:
+#     type: kubernetes
+#     runner: [self-hosted, production]
+#     namespace: prod
 #
 # # Optional: Override default Kustomize paths
 # kustomize:
 #   base: k8s/base
 #   overlays: k8s/overlays
 #
-# # Optional: Run migrations before deploy
+# # Optional: Run MySQL/Flyway migrations before deploy (infra-level)
 # migrations:
 #   enabled: true
 #   path: infra/mysql/migrations
@@ -27,21 +48,55 @@
 #
 # targets:
 #   dev:
+#     type: server
+#     method: rsync
+#     runner: ubuntu-latest       # GitHub Actions runner (string or array)
 #     hosts:
 #       - web1.dev.example.com
 #     path: /var/www/myapp
+#     owner: www-data:www-data    # File ownership (user:group)
+#     keep_releases: 5            # Number of releases to keep
+#
+#     # Shared directories (symlinked to shared/)
+#     shared_dirs:
+#       - storage
+#       - uploads
+#
+#     # Shared files (symlinked to shared/)
+#     shared_files:
+#       - .env
+#       - config/secrets.yml
+#
+#     # Config file deployment
+#     config:
+#       files:
+#         - source: config/apache.conf       # Relative to service path
+#           dest: /etc/apache2/sites-available/myapp.conf
+#       post_config:                          # Commands after config deployed
+#         - sudo systemctl reload apache2
+#
+#     # Post-deploy commands (run in release directory)
 #     post_deploy:
 #       - composer install --no-dev
-#       - ./bin/migrate.sh        # Your migration script
+#       - ./bin/migrate.sh
 #       - sudo systemctl reload php-fpm
 #
+#     # Ansible playbook support (optional)
+#     ansible:
+#       playbook: ansible/playbooks/deploy.yml   # Path from repo root
+#       extra_vars:
+#         php_version: "8.2"
+#
 #   staging:
+#     type: server
 #     hosts:
 #       - web1.staging.example.com
 #       - web2.staging.example.com
 #     path: /var/www/myapp
 #
 #   prod:
+#     type: server
+#     runner: [self-hosted, production]   # Can be array for labels
 #     hosts:
 #       - web1.example.com
 #       - web2.example.com

@@ -167,9 +167,10 @@ Use the version bump script before creating a PR:
 
 1. Open PR targeting `develop`, `staging`, or `main`
 2. CI detects which services changed
-3. Changed services are built with environment-appropriate version suffix
-4. Images pushed to container registry
-5. Git tags created
+3. Schema validation runs if MySQL migrations/schema files changed
+4. Changed services are built with environment-appropriate version suffix
+5. Images pushed to container registry
+6. Git tags created
 
 ### Deployment Flow
 
@@ -225,6 +226,10 @@ The pipeline distinguishes between code and config changes:
 | Config only (`k8s/` directory) | Skipped | Reuse existing image |
 
 This enables fast config-only deployments (HPA tuning, resource limits, replica counts) without rebuilding images.
+
+### Schema Validation
+
+Pull requests that modify MySQL migrations or schema files automatically trigger schema validation via `scripts/validate-schema.sh`. This ensures migrations and schema definitions remain in sync.
 
 ## Parallel Development
 
@@ -342,6 +347,7 @@ targets:
   dev:
     type: server
     method: rsync
+    runner: ubuntu-latest           # GitHub Actions runner (or self-hosted)
     hosts:
       - web1.dev.example.com
     path: /var/www/dashboard
@@ -350,6 +356,14 @@ targets:
     shared_dirs:
       - storage
       - uploads
+    shared_files:
+      - .env                        # Symlink to shared/.env
+    config:
+      files:
+        - source: config/apache.conf
+          dest: /etc/apache2/sites-available/dashboard.conf
+      post_config:
+        - sudo systemctl reload apache2
     post_deploy:
       - php artisan cache:clear
   staging:
@@ -450,6 +464,25 @@ WORKDIR /app/services/api
 RUN npm ci && npm run build
 ```
 
+### Runner Configuration
+
+Each deployment target can specify a custom GitHub Actions runner:
+
+```yaml
+targets:
+  dev:
+    type: kubernetes
+    runner: ubuntu-latest         # Default GitHub-hosted runner
+  staging:
+    type: kubernetes
+    runner: self-hosted           # Self-hosted runner
+  prod:
+    type: kubernetes
+    runner: [self-hosted, production]  # Multiple labels
+```
+
+This enables deployments to private clusters using self-hosted runners with network access.
+
 ### Namespace Configuration
 
 For Kubernetes deployments, the namespace is extracted from your `kustomization.yaml`:
@@ -487,6 +520,53 @@ The pipeline reads the namespace from `kustomization.yaml` rather than assuming 
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Ansible Support
+
+Server deployments can use Ansible playbooks for complex provisioning:
+
+```yaml
+# apps/legacy-app/deploy.yaml
+build:
+  type: none
+
+targets:
+  prod:
+    type: server
+    hosts:
+      - web1.example.com
+      - web2.example.com
+    path: /var/www/app
+    ansible:
+      playbook: ansible/playbooks/deploy-app.yml
+      extra_vars:
+        php_version: "8.2"
+        enable_opcache: true
+```
+
+The playbook receives these variables automatically:
+- `repo_root` - Path to the repository
+- `deploy_path` - Base deployment path
+- `release_name` - Current release name
+- `release_path` - Path to current release
+- `shared_path` - Path to shared directory
+- `current_path` - Path to current symlink
+- `version` - Deployed version
+- `deploy_env` - Environment name
+- `service` - Service name
+
+### Build Scripts
+
+Server deployments support custom build scripts in the `scripts/` directory:
+
+| Script | When it runs |
+|--------|--------------|
+| `scripts/pre-build.sh` | Before build step |
+| `scripts/build.sh` | Main build step |
+| `scripts/post-build.sh` | After build step |
+| `scripts/post-deploy.sh` | After deployment completes |
+
+Scripts receive `VERSION`, `ENVIRONMENT`, `DEPLOY_PATH`, and `RELEASE_NAME` environment variables.
 
 See [`deploy/deploy.schema.yaml`](deploy/deploy.schema.yaml) for full configuration options.
 
@@ -669,6 +749,9 @@ Migrations run automatically via the `_deploy-migrations.yml` workflow:
 
 # Validate platform compatibility
 ./scripts/validate-platform.sh [--strict]
+
+# Validate MySQL schema matches migrations (runs automatically in CI)
+./scripts/validate-schema.sh [--ci]
 ```
 
 ## Container Registries
