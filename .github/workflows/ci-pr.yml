@@ -107,8 +107,8 @@ jobs:
         with:
           filters: |
             schema:
-              - 'infra/mysql/migrations/**'
-              - 'infra/mysql/schema/**'
+              - 'infra/mariadb/migrations/**'
+              - 'infra/mariadb/schema/**'
 
       - name: Validate schema matches migrations
         if: steps.schema-changes.outputs.schema == 'true'

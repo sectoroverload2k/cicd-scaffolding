@@ -53,6 +53,7 @@ runs:
       shell: bash
       env:
         ENVIRONMENT: ${{ inputs.environment }}
+        GITHUB_EVENT_BEFORE: ${{ github.event.before }}
       run: |
         # Initialize arrays
         declare -a services=()
@@ -64,8 +65,15 @@ runs:
         HAS_SERVER=false
         HAS_MIGRATIONS=false
 
-        # Get changed files compared to previous commit
-        if git rev-parse HEAD~1 >/dev/null 2>&1; then
+        # Get changed files compared to previous state on remote
+        # Use GITHUB_EVENT_BEFORE if available (set by push event) to capture all commits in the push
+        BEFORE_SHA="${GITHUB_EVENT_BEFORE:-}"
+        if [[ -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]] && git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+          # Compare against the commit that was on the branch before this push
+          # This captures all files changed across all commits in the push
+          CHANGED_FILES=$(git diff --name-only "$BEFORE_SHA" HEAD)
+        elif git rev-parse HEAD~1 >/dev/null 2>&1; then
+          # Fallback for local testing or missing before SHA
           CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
         else
           # First commit - consider all files as changed
@@ -74,18 +82,18 @@ runs:
 
         # Check if shared infrastructure changed (triggers rebuild of all)
         SHARED_CHANGED=false
-        if echo "$CHANGED_FILES" | grep -qE "^(infra/shared/|\.github/workflows/_.*\.yml|platform/platform\.yaml)"; then
+        if echo "$CHANGED_FILES" | grep -qE "^(shared/|infra/shared/|\.github/workflows/_.*\.yml|platform/platform\.yaml)"; then
           SHARED_CHANGED=true
         fi
 
         # Extract unique component directories from changed files
-        # Looks for: apps/<name>/, services/<name>/, infra/<name>/
-        CHANGED_COMPONENTS=$(echo "$CHANGED_FILES" | grep -oE "^(apps|services|infra)/[^/]+" | sort -u || true)
+        # Looks for: apps/<name>/, services/<name>/, workers/<name>/, infra/<name>/
+        CHANGED_COMPONENTS=$(echo "$CHANGED_FILES" | grep -oE "^(apps|services|workers|infra)/[^/]+" | sort -u || true)
 
         # If shared changed, find ALL components with deploy.yaml
         if [[ "$SHARED_CHANGED" == "true" ]]; then
           ALL_COMPONENTS=""
-          for dir in apps services infra; do
+          for dir in apps services workers infra; do
             if [[ -d "$dir" ]]; then
               for component_path in "$dir"/*/; do
                 if [[ -d "$component_path" ]]; then
@@ -243,7 +251,7 @@ runs:
           fi
         }
 
-        # Function to get database config (for pg_migrations flag)
+        # Function to get database config (for pg_migrations and mysql_migrations flags)
         get_database_config() {
           local path=$1
 
@@ -258,16 +266,15 @@ runs:
             db_type = database.get('type', '')
             migrations = database.get('migrations', False)
 
-            # Return pg_migrations flag if postgresql with migrations enabled
-            if db_type == 'postgresql' and migrations:
-                print('true')
-            else:
-                print('false')
+            pg_migrations = 'true' if db_type == 'postgresql' and migrations else 'false'
+            mysql_migrations = 'true' if db_type == 'mysql' and migrations else 'false'
+
+            print(f'{pg_migrations}|{mysql_migrations}')
         except:
-            print('false')
-        " 2>/dev/null || echo "false"
+            print('false|false')
+        " 2>/dev/null || echo "false|false"
           else
-            echo "false"
+            echo "false|false"
           fi
         }
 
@@ -297,6 +304,7 @@ runs:
           case "$comp_type" in
             apps) comp_type="app" ;;
             services) comp_type="service" ;;
+            workers) comp_type="worker" ;;
             infra) comp_type="infra" ;;
           esac
 
@@ -327,12 +335,12 @@ runs:
             runner_json=$(get_runner_config "$component_path" "$deploy_type")
 
             # Get database configuration
-            pg_migrations=$(get_database_config "$component_path")
+            IFS='|' read -r pg_migrations mysql_migrations <<< "$(get_database_config "$component_path")"
 
             services+=("$component")
 
             # Base JSON for all types
-            base_json="\"service\":\"${component}\",\"path\":\"${component_path}\",\"type\":\"${comp_type}\",\"build_type\":\"${build_type}\",\"runner\":${runner_json},\"needs_build\":${NEEDS_BUILD},\"pg_migrations\":${pg_migrations}"
+            base_json="\"service\":\"${component}\",\"path\":\"${component_path}\",\"type\":\"${comp_type}\",\"build_type\":\"${build_type}\",\"runner\":${runner_json},\"needs_build\":${NEEDS_BUILD},\"pg_migrations\":${pg_migrations},\"mysql_migrations\":${mysql_migrations}"
             [[ -n "$build_cmd" ]] && base_json="${base_json},\"build_cmd\":\"${build_cmd}\""
             [[ -n "$build_output" ]] && base_json="${base_json},\"build_output\":\"${build_output}\""
             [[ -n "$build_context" ]] && base_json="${base_json},\"build_context\":\"${build_context}\""

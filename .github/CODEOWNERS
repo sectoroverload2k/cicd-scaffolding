@@ -26,7 +26,7 @@
 # ============================================
 # Infrastructure
 # ============================================
-/infra/mysql/                       @platform-team
+/infra/mariadb/                     @platform-team
 /infra/redis/                       @platform-team
 /infra/shared/                      @platform-team
 

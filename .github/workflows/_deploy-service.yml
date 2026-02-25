@@ -30,7 +30,7 @@ on:
         type: string
         default: 'ghcr.io'
         description: 'Container registry'
-      run-migrations:
+      run-mysql-migrations:
         required: false
         type: boolean
         default: false
@@ -107,17 +107,28 @@ jobs:
         id: image-tag
         run: |
           SERVICE_PATH="${{ inputs.service-path }}"
+          SERVICE_TYPE=$(echo "$SERVICE_PATH" | cut -d'/' -f1)
+
+          # Skip for infra components (they use standard images, not custom builds)
+          if [[ "$SERVICE_TYPE" == "infra" ]]; then
+            echo "tag=standard" >> $GITHUB_OUTPUT
+            echo "Infra component - using standard image from manifests" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
 
           if [[ "${{ inputs.keep-existing-image }}" == "true" ]]; then
-            # Get the current image from the running deployment
+            # Get the current image from the running workload (Deployment or StatefulSet)
             NAMESPACE="${{ steps.namespace.outputs.namespace }}"
-            DEPLOYMENT="${{ inputs.service }}"
+            RESOURCE="${{ inputs.service }}"
 
-            CURRENT_IMAGE=$(kubectl get deployment "$DEPLOYMENT" -n "$NAMESPACE" \
+            # Try Deployment first, then StatefulSet
+            CURRENT_IMAGE=$(kubectl get deployment "$RESOURCE" -n "$NAMESPACE" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || \
+              kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" \
               -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
 
             if [[ -z "$CURRENT_IMAGE" ]]; then
-              echo "::error::No existing deployment found for ${DEPLOYMENT} in namespace ${NAMESPACE}. Cannot use keep-existing-image for initial deployments."
+              echo "::error::No existing Deployment or StatefulSet found for ${RESOURCE} in namespace ${NAMESPACE}. Cannot use keep-existing-image for initial deployments."
               exit 1
             fi
 
@@ -148,162 +159,6 @@ jobs:
             echo "Deploying image tag: ${IMAGE_TAG}" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Run database migrations
-        if: inputs.run-migrations
-        run: |
-          echo "### Running Migrations" >> $GITHUB_STEP_SUMMARY
-
-          NAMESPACE="${{ steps.namespace.outputs.namespace }}"
-
-          # Check if migrations exist for this service
-          MIGRATION_PATH="infra/mysql/migrations"
-          if [[ -d "$MIGRATION_PATH" ]]; then
-            # Create ConfigMap from SQL files
-            kubectl create configmap flyway-migrations \
-              --from-file="$MIGRATION_PATH" \
-              --namespace=$NAMESPACE \
-              --dry-run=client -o yaml | kubectl apply -f -
-
-            # Apply migration job
-            kubectl apply -k infra/mysql/k8s/overlays/${{ inputs.environment }}/
-
-            # Wait for migration to complete
-            kubectl wait --for=condition=complete \
-              job/flyway-migrate \
-              --namespace=$NAMESPACE \
-              --timeout=300s
-
-            echo "- Migrations completed successfully" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- No migrations found, skipping" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Run PostgreSQL migrations
-        if: inputs.run-pg-migrations
-        run: |
-          echo "### Running PostgreSQL Migrations" >> $GITHUB_STEP_SUMMARY
-
-          SERVICE="${{ inputs.service }}"
-          SERVICE_PATH="${{ inputs.service-path }}"
-          NAMESPACE="${{ steps.namespace.outputs.namespace }}"
-          MIGRATIONS_PATH="${SERVICE_PATH}/migrations"
-
-          if [[ ! -d "$MIGRATIONS_PATH" ]]; then
-            echo "- No migrations directory found at $MIGRATIONS_PATH" >> $GITHUB_STEP_SUMMARY
-            exit 0
-          fi
-
-          # Count migration files
-          MIGRATION_COUNT=$(find "$MIGRATIONS_PATH" -maxdepth 1 -name "*.sql" -type f | wc -l)
-          if [[ "$MIGRATION_COUNT" -eq 0 ]]; then
-            echo "- No migration files found" >> $GITHUB_STEP_SUMMARY
-            exit 0
-          fi
-
-          echo "Found $MIGRATION_COUNT migration files"
-
-          # Create ConfigMap from migration files
-          kubectl create configmap "${SERVICE}-migrations" \
-            --from-file="$MIGRATIONS_PATH" \
-            --namespace="$NAMESPACE" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          # Get database password from secret
-          DB_PASSWORD=$(kubectl get secret "${SERVICE}-secrets" -n "$NAMESPACE" \
-            -o jsonpath='{.data.DB_PASSWORD}' 2>/dev/null | base64 -d || echo "")
-
-          # Database service name (convention: {service}-postgres)
-          DB_SERVICE="${SERVICE}-postgres"
-
-          # Create and run the migration job
-          JOB_NAME="${SERVICE}-migrate-$(date +%s)"
-
-          cat <<EOF | kubectl apply -f -
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: $JOB_NAME
-            namespace: $NAMESPACE
-            labels:
-              app: ${SERVICE}-migrate
-          spec:
-            ttlSecondsAfterFinished: 300
-            backoffLimit: 0
-            template:
-              spec:
-                restartPolicy: Never
-                containers:
-                  - name: migrate
-                    image: postgres:16-alpine
-                    env:
-                      - name: PGHOST
-                        value: "$DB_SERVICE"
-                      - name: PGPORT
-                        value: "5432"
-                      - name: PGDATABASE
-                        value: "$SERVICE"
-                      - name: PGUSER
-                        value: "$SERVICE"
-                      - name: PGPASSWORD
-                        value: "$DB_PASSWORD"
-                    volumeMounts:
-                      - name: migrations
-                        mountPath: /migrations
-                        readOnly: true
-                    command:
-                      - /bin/sh
-                      - -c
-                      - |
-                        set -e
-                        echo "=== PostgreSQL Migration Runner ==="
-
-                        # Wait for database
-                        until pg_isready -h \$PGHOST -p \$PGPORT -U \$PGUSER; do sleep 2; done
-
-                        # Create tracking table
-                        psql -c "CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(255) PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW());"
-
-                        # Get applied migrations
-                        APPLIED=\$(psql -t -A -c "SELECT version FROM schema_migrations ORDER BY version;")
-
-                        # Run pending migrations
-                        APPLIED_COUNT=0
-                        for migration in \$(ls /migrations/*.sql 2>/dev/null | sort); do
-                          filename=\$(basename "\$migration")
-                          version="\${filename%.sql}"
-                          if echo "\$APPLIED" | grep -q "^\$version\$"; then
-                            echo "SKIP: \$version"
-                            continue
-                          fi
-                          echo "APPLYING: \$version"
-                          psql -v ON_ERROR_STOP=1 -f "\$migration"
-                          psql -c "INSERT INTO schema_migrations (version) VALUES ('\$version');"
-                          APPLIED_COUNT=\$((APPLIED_COUNT + 1))
-                        done
-
-                        echo "Applied \$APPLIED_COUNT new migration(s)"
-                volumes:
-                  - name: migrations
-                    configMap:
-                      name: ${SERVICE}-migrations
-          EOF
-
-          echo "Waiting for migration job: $JOB_NAME"
-
-          # Wait for completion
-          if kubectl wait --for=condition=complete job/"$JOB_NAME" -n "$NAMESPACE" --timeout=300s 2>/dev/null; then
-            POD_NAME=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}')
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            kubectl logs "$POD_NAME" -n "$NAMESPACE" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "- PostgreSQL migrations completed successfully" >> $GITHUB_STEP_SUMMARY
-          else
-            POD_NAME=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}')
-            echo "::error::PostgreSQL migration failed"
-            kubectl logs "$POD_NAME" -n "$NAMESPACE" || true
-            exit 1
-          fi
-
       - name: Substitute secrets in manifests
         run: |
           OVERLAY_PATH="${{ inputs.service-path }}/k8s/overlays/${{ inputs.environment }}"
@@ -328,10 +183,17 @@ jobs:
             exit 1
           fi
 
-          cd "$OVERLAY_PATH"
-
-          # Extract service type from path (e.g., services/emailer -> services)
+          # Extract service type from path (e.g., services/emailer -> services, infra/mariadb -> infra)
           SERVICE_TYPE=$(echo "${{ inputs.service-path }}" | cut -d'/' -f1)
+
+          # Skip image update for infra components (they use standard images like mariadb:11)
+          if [[ "$SERVICE_TYPE" == "infra" ]]; then
+            echo "Skipping image update for infra component (uses standard image)"
+            echo "tag=standard" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          cd "$OVERLAY_PATH"
 
           # Container registries require lowercase names
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
@@ -376,37 +238,137 @@ jobs:
             echo "- Image source: kept existing (k8s config only change)" >> $GITHUB_STEP_SUMMARY
           fi
 
+      - name: Detect resource type
+        id: resource
+        run: |
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
+          RESOURCE="${{ inputs.service }}"
+
+          # Check if it's a StatefulSet
+          if kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
+            echo "type=statefulset" >> $GITHUB_OUTPUT
+            echo "Detected StatefulSet: $RESOURCE"
+          elif kubectl get deployment "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
+            echo "type=deployment" >> $GITHUB_OUTPUT
+            echo "Detected Deployment: $RESOURCE"
+          else
+            echo "::error::Resource $RESOURCE not found as Deployment or StatefulSet"
+            exit 1
+          fi
+
       - name: Wait for rollout
         run: |
           NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
+          RESOURCE="${{ inputs.service }}"
+          TYPE="${{ steps.resource.outputs.type }}"
 
-          # Get the deployment name (usually matches service name)
-          DEPLOYMENT="${{ inputs.service }}"
+          echo "Waiting for $TYPE $RESOURCE in namespace $NAMESPACE to roll out..."
 
-          echo "Waiting for deployment $DEPLOYMENT in namespace $NAMESPACE to roll out..."
-
-          kubectl rollout status deployment/$DEPLOYMENT \
+          kubectl rollout status "$TYPE/$RESOURCE" \
             --namespace=$NAMESPACE \
             --timeout=300s
 
           echo "### Rollout Complete" >> $GITHUB_STEP_SUMMARY
-          kubectl get deployment $DEPLOYMENT -n $NAMESPACE -o wide >> $GITHUB_STEP_SUMMARY
+          kubectl get "$TYPE" "$RESOURCE" -n "$NAMESPACE" -o wide >> $GITHUB_STEP_SUMMARY
 
       - name: Verify deployment
         run: |
           NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
-          DEPLOYMENT="${{ inputs.service }}"
+          RESOURCE="${{ inputs.service }}"
+          TYPE="${{ steps.resource.outputs.type }}"
 
           # Get pod status
           echo "### Pod Status" >> $GITHUB_STEP_SUMMARY
-          kubectl get pods -n $NAMESPACE -l app=$DEPLOYMENT -o wide >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n "$NAMESPACE" -l app="$RESOURCE" -o wide >> $GITHUB_STEP_SUMMARY
 
           # Check for ready pods
-          READY_PODS=$(kubectl get deployment $DEPLOYMENT -n $NAMESPACE -o jsonpath='{.status.readyReplicas}')
-          DESIRED_PODS=$(kubectl get deployment $DEPLOYMENT -n $NAMESPACE -o jsonpath='{.spec.replicas}')
+          READY_PODS=$(kubectl get "$TYPE" "$RESOURCE" -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}')
+          DESIRED_PODS=$(kubectl get "$TYPE" "$RESOURCE" -n "$NAMESPACE" -o jsonpath='{.spec.replicas}')
 
           if [[ "$READY_PODS" != "$DESIRED_PODS" ]]; then
             echo "::warning::Only $READY_PODS of $DESIRED_PODS pods are ready"
+          fi
+
+      - name: Run database migrations
+        if: inputs.run-mysql-migrations || inputs.run-pg-migrations
+        run: |
+          echo "### Running Database Migrations" >> $GITHUB_STEP_SUMMARY
+
+          SERVICE="${{ inputs.service }}"
+          SERVICE_PATH="${{ inputs.service-path }}"
+          NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
+          MIGRATIONS_PATH="${SERVICE_PATH}/migrations"
+          MIGRATION_TEMPLATE="${SERVICE_PATH}/k8s/base/migration.yaml"
+          OVERLAY_PATH="${SERVICE_PATH}/k8s/overlays/${{ inputs.environment }}"
+
+          # Check for migration template
+          if [[ ! -f "$MIGRATION_TEMPLATE" ]]; then
+            echo "- No migration template found at $MIGRATION_TEMPLATE" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Check for migration files
+          if [[ ! -d "$MIGRATIONS_PATH" ]]; then
+            echo "- No migrations directory found at $MIGRATIONS_PATH" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          MIGRATION_COUNT=$(find "$MIGRATIONS_PATH" -maxdepth 1 -name "*.sql" -type f | wc -l)
+          if [[ "$MIGRATION_COUNT" -eq 0 ]]; then
+            echo "- No migration files found" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "Found $MIGRATION_COUNT migration files"
+
+          # Create ConfigMap from migration files
+          kubectl create configmap "${SERVICE}-migrations" \
+            --from-file="$MIGRATIONS_PATH" \
+            --namespace="$NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Generate unique job name with timestamp
+          JOB_NAME="${SERVICE}-migrate-$(date +%s)"
+
+          # Apply migration template with unique job name
+          sed "s/name: ${SERVICE}-migrate$/name: ${JOB_NAME}/" "$MIGRATION_TEMPLATE" | \
+            kubectl apply -n "$NAMESPACE" -f -
+
+          echo "Waiting for migration job: $JOB_NAME"
+
+          # Wait for the pod to be created (with timeout)
+          for i in {1..30}; do
+            POD_COUNT=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" --no-headers 2>/dev/null | wc -l)
+            if [[ "$POD_COUNT" -gt 0 ]]; then
+              echo "Pod created for job $JOB_NAME"
+              break
+            fi
+            if [[ $i -eq 30 ]]; then
+              echo "::warning::Pod not created after 30 seconds"
+            fi
+            sleep 1
+          done
+
+          # Wait for completion
+          if kubectl wait --for=condition=complete job/"$JOB_NAME" -n "$NAMESPACE" --timeout=300s 2>/dev/null; then
+            POD_NAME=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [[ -n "$POD_NAME" ]]; then
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              kubectl logs "$POD_NAME" -n "$NAMESPACE" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "- Migrations completed successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            POD_NAME=$(kubectl get pods -n "$NAMESPACE" -l job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            echo "::error::Migration failed"
+
+            if [[ -n "$POD_NAME" ]]; then
+              kubectl logs "$POD_NAME" -n "$NAMESPACE" || true
+            else
+              echo "No pod found for job $JOB_NAME. Job may have failed to create pod."
+              kubectl describe job "$JOB_NAME" -n "$NAMESPACE" || true
+            fi
+            exit 1
           fi
 
       - name: Cleanup on failure
@@ -416,11 +378,12 @@ jobs:
           echo "Rolling back..." >> $GITHUB_STEP_SUMMARY
 
           NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
-          DEPLOYMENT="${{ inputs.service }}"
+          RESOURCE="${{ inputs.service }}"
+          TYPE="${{ steps.resource.outputs.type }}"
 
-          # Attempt rollback
-          kubectl rollout undo deployment/$DEPLOYMENT -n $NAMESPACE || true
+          # Attempt rollback (works for both Deployment and StatefulSet)
+          kubectl rollout undo "$TYPE/$RESOURCE" -n "$NAMESPACE" || true
 
           # Get logs from failing pods
           echo "### Pod Logs" >> $GITHUB_STEP_SUMMARY
-          kubectl logs -n $NAMESPACE -l app=$DEPLOYMENT --tail=50 >> $GITHUB_STEP_SUMMARY || true
+          kubectl logs -n "$NAMESPACE" -l app="$RESOURCE" --tail=50 >> $GITHUB_STEP_SUMMARY || true

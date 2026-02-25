@@ -12,6 +12,7 @@ permissions:
   contents: write
   pull-requests: read
   packages: write
+  actions: write
 
 jobs:
   detect-changes:
@@ -81,7 +82,7 @@ jobs:
       environment: dev
       image-tag: ${{ needs.build.outputs.version }}
       keep-existing-image: ${{ needs.build.outputs.keep-existing-image == 'true' }}
-      run-migrations: ${{ matrix.type == 'service' }}
+      run-mysql-migrations: ${{ matrix.mysql_migrations == true }}
       run-pg-migrations: ${{ matrix.pg_migrations == true }}
       runner: ${{ toJson(matrix.runner) }}
     secrets:

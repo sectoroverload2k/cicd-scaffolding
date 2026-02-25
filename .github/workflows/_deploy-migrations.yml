@@ -10,13 +10,13 @@ on:
       migrations-path:
         required: false
         type: string
-        default: 'infra/mysql/migrations'
+        default: 'infra/mariadb/migrations'
         description: 'Path to migration files'
       baseline-version:
         required: false
         type: string
-        default: ''
-        description: 'Baseline version for new databases'
+        default: '0'
+        description: 'Baseline version for new databases (0 means all migrations run)'
     secrets:
       DATABASE_URL:
         required: true

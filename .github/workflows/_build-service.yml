@@ -226,6 +226,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python for pre-build hooks
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Run pre-build hook
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          PRE_BUILD_SCRIPT="${SERVICE_PATH}/scripts/pre-build.sh"
+
+          if [[ -f "$PRE_BUILD_SCRIPT" ]]; then
+            echo "Found pre-build hook: $PRE_BUILD_SCRIPT"
+            chmod +x "$PRE_BUILD_SCRIPT"
+            bash "$PRE_BUILD_SCRIPT"
+            echo "✓ Pre-build hook completed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No pre-build hook found (looked for: $PRE_BUILD_SCRIPT)"
+          fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -276,6 +298,26 @@ jobs:
             VERSION=${{ needs.build.outputs.version }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
+
+      - name: Run post-build hook
+        run: |
+          SERVICE_PATH="${{ inputs.service-path }}"
+          POST_BUILD_SCRIPT="${SERVICE_PATH}/scripts/post-build.sh"
+
+          if [[ -f "$POST_BUILD_SCRIPT" ]]; then
+            echo "Found post-build hook: $POST_BUILD_SCRIPT"
+            chmod +x "$POST_BUILD_SCRIPT"
+
+            # Make build outputs available to post-build script
+            export BUILD_VERSION="${{ needs.build.outputs.version }}"
+            export BUILD_IMAGE="${{ steps.meta.outputs.tags }}"
+            export BUILD_DIGEST="${{ steps.build-push.outputs.digest }}"
+
+            bash "$POST_BUILD_SCRIPT"
+            echo "✓ Post-build hook completed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No post-build hook found (looked for: $POST_BUILD_SCRIPT)"
+          fi
 
       - name: Create git tag
         if: inputs.push
