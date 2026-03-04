@@ -141,10 +141,10 @@ runs:
                 method = config.get('method', '')
                 print(f'{deploy_type}|{method}')
         except:
-            print('kubernetes|')
-        " 2>/dev/null || echo "kubernetes|"
+            print('skip|')
+        " 2>/dev/null || echo "skip|"
           else
-            echo "kubernetes|"
+            echo "skip|"
           fi
         }
 

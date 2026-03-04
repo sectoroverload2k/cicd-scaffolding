@@ -273,8 +273,21 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "owner=$OWNER" >> $GITHUB_OUTPUT
 
+      - name: Check for Dockerfile
+        id: check-dockerfile
+        run: |
+          DOCKERFILE="${{ inputs.service-path }}/Dockerfile"
+          if [[ -f "$DOCKERFILE" ]]; then
+            echo "dockerfile_exists=true" >> $GITHUB_OUTPUT
+            echo "✓ Dockerfile found: $DOCKERFILE" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "dockerfile_exists=false" >> $GITHUB_OUTPUT
+            echo "⊝ Dockerfile not found: $DOCKERFILE (skipping build)" >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Extract metadata
         id: meta
+        if: steps.check-dockerfile.outputs.dockerfile_exists == 'true'
         uses: docker/metadata-action@v5
         with:
           images: ${{ inputs.registry }}/${{ steps.image-path.outputs.owner }}/${{ steps.image-path.outputs.type }}/${{ inputs.service }}
@@ -285,6 +298,7 @@ jobs:
 
       - name: Build and push
         id: build-push
+        if: steps.check-dockerfile.outputs.dockerfile_exists == 'true'
         uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.build-context != '' && inputs.build-context || inputs.service-path }}
@@ -292,12 +306,12 @@ jobs:
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          pull: true
           build-args: |
             VERSION=${{ needs.build.outputs.version }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
+            CACHEBUST=${{ github.run_number }}
 
       - name: Run post-build hook
         run: |

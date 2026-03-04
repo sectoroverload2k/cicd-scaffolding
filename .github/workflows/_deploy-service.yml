@@ -121,20 +121,31 @@ jobs:
             NAMESPACE="${{ steps.namespace.outputs.namespace }}"
             RESOURCE="${{ inputs.service }}"
 
-            # Try Deployment first, then StatefulSet
-            CURRENT_IMAGE=$(kubectl get deployment "$RESOURCE" -n "$NAMESPACE" \
-              -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || \
-              kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" \
-              -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+            echo "Attempting to fetch current image for ${RESOURCE} in namespace ${NAMESPACE}..."
+
+            # Try Deployment first, then StatefulSet (don't silence errors to aid debugging)
+            CURRENT_IMAGE=""
+            if kubectl get deployment "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
+              CURRENT_IMAGE=$(kubectl get deployment "$RESOURCE" -n "$NAMESPACE" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              echo "Found Deployment: $RESOURCE"
+            elif kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
+              CURRENT_IMAGE=$(kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}')
+              echo "Found StatefulSet: $RESOURCE"
+            fi
 
             if [[ -z "$CURRENT_IMAGE" ]]; then
-              echo "::error::No existing Deployment or StatefulSet found for ${RESOURCE} in namespace ${NAMESPACE}. Cannot use keep-existing-image for initial deployments."
+              echo "::error::Cannot find existing Deployment or StatefulSet for ${RESOURCE} in namespace ${NAMESPACE}."
+              echo "::error::When keep-existing-image is true, the resource must already exist in the cluster."
+              echo "::error::If this is a new service, ensure needs_build=true in the change detection."
               exit 1
             fi
 
             # Extract just the tag from the full image reference
             IMAGE_TAG="${CURRENT_IMAGE##*:}"
             echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+            echo "Current image: ${CURRENT_IMAGE}" >> $GITHUB_STEP_SUMMARY
             echo "Keeping existing image tag: ${IMAGE_TAG}" >> $GITHUB_STEP_SUMMARY
           else
             # Read version from VERSION file or package.json
@@ -244,17 +255,29 @@ jobs:
           NAMESPACE="${{ steps.kustomize.outputs.namespace }}"
           RESOURCE="${{ inputs.service }}"
 
-          # Check if it's a StatefulSet
-          if kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
-            echo "type=statefulset" >> $GITHUB_OUTPUT
-            echo "Detected StatefulSet: $RESOURCE"
-          elif kubectl get deployment "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
-            echo "type=deployment" >> $GITHUB_OUTPUT
-            echo "Detected Deployment: $RESOURCE"
-          else
-            echo "::error::Resource $RESOURCE not found as Deployment or StatefulSet"
-            exit 1
-          fi
+          # Retry loop for first-time deployments (resource may not exist immediately after apply)
+          MAX_RETRIES=10
+          RETRY_DELAY=3
+
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            if kubectl get statefulset "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
+              echo "type=statefulset" >> $GITHUB_OUTPUT
+              echo "Detected StatefulSet: $RESOURCE (attempt $attempt)"
+              exit 0
+            elif kubectl get deployment "$RESOURCE" -n "$NAMESPACE" &>/dev/null; then
+              echo "type=deployment" >> $GITHUB_OUTPUT
+              echo "Detected Deployment: $RESOURCE (attempt $attempt)"
+              exit 0
+            fi
+
+            if [[ $attempt -lt $MAX_RETRIES ]]; then
+              echo "Resource not found yet, waiting ${RETRY_DELAY}s... (attempt $attempt/$MAX_RETRIES)"
+              sleep $RETRY_DELAY
+            fi
+          done
+
+          echo "::error::Resource $RESOURCE not found as Deployment or StatefulSet after $MAX_RETRIES attempts"
+          exit 1
 
       - name: Wait for rollout
         run: |
