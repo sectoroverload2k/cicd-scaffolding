@@ -60,6 +60,24 @@ on:
       JWT_SECRET:
         required: false
         description: 'JWT secret for secret substitution'
+      DB_PASS:
+        required: false
+        description: 'Application database password for secret substitution'
+      PG_PASS:
+        required: false
+        description: 'PostgreSQL password for secret substitution'
+      ANTHROPIC_API_KEY:
+        required: false
+        description: 'Anthropic API key for secret substitution'
+      GOOGLE_CLIENT_ID:
+        required: false
+        description: 'Google OAuth client ID for secret substitution'
+      GOOGLE_CLIENT_SECRET:
+        required: false
+        description: 'Google OAuth client secret for secret substitution'
+      VOYAGE_API_KEY:
+        required: false
+        description: 'Voyage AI API key for secret substitution'
 
 jobs:
   deploy:
@@ -181,13 +199,21 @@ jobs:
 
           # Check for secret templates
           if [[ -f "${OVERLAY_PATH}/secret.yaml" ]]; then
-            envsubst < "${OVERLAY_PATH}/secret.yaml" > /tmp/secret.yaml
+            # Explicit allowlist so literal $ in manifests is never clobbered.
+            envsubst '${MYSQL_PASSWORD} ${JWT_SECRET} ${DB_PASS} ${PG_PASS} ${ANTHROPIC_API_KEY} ${GOOGLE_CLIENT_ID} ${GOOGLE_CLIENT_SECRET} ${VOYAGE_API_KEY}' \
+              < "${OVERLAY_PATH}/secret.yaml" > /tmp/secret.yaml
             mv /tmp/secret.yaml "${OVERLAY_PATH}/secret.yaml"
             echo "Substituted secrets in ${OVERLAY_PATH}/secret.yaml"
           fi
         env:
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          DB_PASS: ${{ secrets.DB_PASS }}
+          PG_PASS: ${{ secrets.PG_PASS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
 
       - name: Update image in Kustomize
         id: image
